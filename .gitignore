@@ -1,0 +1,137 @@
+# ================================
+# Dependencies
+# ================================
+node_modules/
+**/node_modules/
+
+# ================================
+# Environment Variables
+# ================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# ================================
+# Build Outputs
+# ================================
+dist/
+build/
+**/dist/
+**/build/
+*.tsbuildinfo
+
+# ================================
+# Logs
+# ================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ================================
+# OS Files
+# ================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ================================
+# IDE / Editor
+# ================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# ================================
+# Docker
+# ================================
+# Docker volumes (if mounted locally)
+postgres_data/
+pgdata/
+data/
+
+# ================================
+# Prisma
+# ================================
+# Prisma client is generated, but usually committed
+# Uncomment if you want to ignore it
+# prisma/generated/
+
+# ================================
+# Test Coverage
+# ================================
+coverage/
+.nyc_output/
+*.lcov
+
+# ================================
+# Uploads (User uploaded files)
+# ================================
+uploads/
+**/uploads/
+!uploads/.gitkeep
+
+# ================================
+# Temporary Files
+# ================================
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# ================================
+# Package Manager Locks (Optional)
+# Uncomment if you want to ignore lock files
+# ================================
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# ================================
+# Vite
+# ================================
+*.local
+
+# ================================
+# TypeScript
+# ================================
+*.tsbuildinfo
+
+# ================================
+# Debug
+# ================================
+.debug/
+
+# ================================
+# Secrets & Certificates
+# ================================
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+
+# ================================
+# Misc
+# ================================
+.cache/
+.parcel-cache/
+.turbo/

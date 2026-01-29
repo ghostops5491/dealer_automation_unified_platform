@@ -1,0 +1,399 @@
+// Prisma Schema for CRM System
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTHENTICATION & HIERARCHY ====================
+
+model SuperAdmin {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Organization {
+  id          String   @id @default(uuid())
+  name        String                    // Display name
+  code        String   @unique
+  description String?
+  logo        String?                   // Path to organization logo/icon image
+  legalName   String?                   // Organization Legal Name
+  ownerName   String?                   // Owners/Ownership Name
+  address     String?                   // Organization Address
+  gstNumber   String?                   // Organization GST Number
+  panNumber   String?                   // Organization PAN Number
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  branches    Branch[]
+  fields      OrganizationField[]
+}
+
+enum BranchType {
+  TVS
+  HONDA
+}
+
+model Branch {
+  id             String   @id @default(uuid())
+  name           String
+  code           String   @unique
+  description    String?
+  address        String?  // Branch address displayed to users
+  invoiceAddress String?  // Invoice/Billing address for the branch
+  isActive       Boolean  @default(true)
+  organizationId String
+  
+  // External API Integration fields
+  branchType       BranchType @default(TVS)    // TVS or HONDA
+  externalBranchId Int?                         // BRANCH_ID for external API
+  countryCode      String     @default("IN")   // COUNTRY_CODE for external API
+  dealerId         Int?                         // DEALER_ID for external API
+  
+  // Timeline validity for each role
+  managerValidUntil            DateTime?
+  associateValidUntil          DateTime?
+  viewerValidUntil             DateTime?
+  insuranceExecutiveValidUntil DateTime?
+  
+  // Workflow configuration
+  requiresApproval    Boolean  @default(true)  // Configurable: whether this branch needs manager approval
+  
+  // Jobs access configuration
+  allowAssociateJobs  Boolean  @default(false) // Allow Associates to access Jobs menu
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users          User[]
+  fields         BranchField[]
+  flowAssignments FlowAssignment[]
+  formSubmissions FormSubmission[]
+  vehicleCatalog  VehicleCatalog[]
+}
+
+enum UserRole {
+  MANAGER
+  ASSOCIATE
+  VIEWER
+  INSURANCE_EXECUTIVE
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  firstName String
+  lastName  String
+  email     String?
+  phone     String?
+  role      UserRole
+  isActive  Boolean  @default(true)
+  branchId  String
+  
+  // External API Integration (TVS/Honda)
+  externalUserId  Int?     // USER_ID for external API
+  externalLoginId String?  // LoginId for external API token generation (e.g., "Admin")
+  externalRoleId  Int?     // RoleId for external API token generation (e.g., 3)
+  
+  // Individual user validity (overrides branch timeline if set)
+  validUntil DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch          Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  fields          UserField[]
+  formSubmissions FormSubmission[]
+  approvals       Approval[]
+  formHistories   FormHistory[]
+  insuranceApprovedSubmissions FormSubmission[] @relation("InsuranceApprover")
+}
+
+// ==================== CUSTOM FIELDS ====================
+
+model OrganizationField {
+  id             String @id @default(uuid())
+  organizationId String
+  fieldName      String
+  fieldValue     String
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@unique([organizationId, fieldName])
+}
+
+model BranchField {
+  id        String @id @default(uuid())
+  branchId  String
+  fieldName String
+  fieldValue String
+  
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  
+  @@unique([branchId, fieldName])
+}
+
+model UserField {
+  id        String @id @default(uuid())
+  userId    String
+  fieldName String
+  fieldValue String
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, fieldName])
+}
+
+// ==================== SCREEN BUILDER ====================
+
+enum FieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  EMAIL
+  PHONE
+  DATE
+  DATETIME
+  SELECT
+  MULTISELECT
+  CHECKBOX
+  RADIO
+  FILE
+  IMAGE
+}
+
+model Screen {
+  id                         String   @id @default(uuid())
+  name                       String
+  code                       String   @unique
+  description                String?
+  isActive                   Boolean  @default(true)
+  requiresApproval           Boolean  @default(false)  // Whether this screen requires manager approval
+  requiresInsuranceApproval  Boolean  @default(false)  // Whether this screen requires Insurance Executive approval
+  isPostApproval             Boolean  @default(false)  // Whether this screen is only accessible after full approval
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  fields     ScreenField[]
+  flowScreens FlowScreen[]
+}
+
+model ScreenField {
+  id           String    @id @default(uuid())
+  screenId     String
+  name         String    // Field name/key
+  label        String    // Display label
+  fieldType    FieldType
+  placeholder  String?
+  defaultValue String?
+  isRequired   Boolean   @default(false)
+  isReadOnly   Boolean   @default(false)  // For system-generated/auto-calculated fields
+  
+  // Validation
+  validationRegex   String?   // Regex pattern for validation
+  validationMessage String?   // Error message when validation fails
+  minLength         Int?
+  maxLength         Int?
+  minValue          Float?
+  maxValue          Float?
+  
+  // For SELECT, MULTISELECT, RADIO, CHECKBOX
+  options      Json?     // Array of {value: string, label: string}
+  
+  // Conditional visibility - show field only when another field has specific value
+  // Format: "screenCode.fieldName" for cross-screen or just "fieldName" for same screen
+  conditionalField  String?   // e.g., "customer_enquiry.ownership_type" or "ownership_type"
+  conditionalValue  String?   // e.g., "individual" or "company" (comma-separated for multiple values)
+  
+  // Ordering
+  sortOrder    Int       @default(0)
+  
+  // Visibility by role
+  visibleToManager   Boolean @default(true)
+  visibleToAssociate Boolean @default(true)
+  visibleToViewer    Boolean @default(true)
+  
+  // Editability by role
+  editableByManager   Boolean @default(true)
+  editableByAssociate Boolean @default(true)
+  editableByViewer    Boolean @default(false)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  screen Screen @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  
+  @@unique([screenId, name])
+}
+
+// ==================== FLOW BUILDER ====================
+
+model Flow {
+  id          String   @id @default(uuid())
+  name        String
+  code        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  flowScreens     FlowScreen[]
+  flowAssignments FlowAssignment[]
+  formSubmissions FormSubmission[]
+}
+
+model FlowScreen {
+  id       String @id @default(uuid())
+  flowId   String
+  screenId String
+  tabOrder Int    // Sequential order of tabs
+  tabName  String // Display name for the tab
+  
+  flow   Flow   @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  screen Screen @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  
+  @@unique([flowId, screenId])
+  @@unique([flowId, tabOrder])
+}
+
+// Assign flows to branches
+model FlowAssignment {
+  id       String @id @default(uuid())
+  flowId   String
+  branchId String
+  
+  // Which roles can access this flow in this branch
+  accessibleByManager   Boolean @default(true)
+  accessibleByAssociate Boolean @default(true)
+  accessibleByViewer    Boolean @default(true)
+  
+  createdAt DateTime @default(now())
+
+  flow   Flow   @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  
+  @@unique([flowId, branchId])
+}
+
+// ==================== FORM SUBMISSIONS & APPROVAL ====================
+
+enum SubmissionStatus {
+  DRAFT
+  PENDING_INSURANCE_APPROVAL    // Waiting for Insurance Executive approval
+  PENDING_MANAGER_APPROVAL      // Insurance approved, waiting for Manager approval
+  PENDING_APPROVAL              // Legacy: waiting for approval (backwards compatibility)
+  APPROVED                      // Fully approved (by all required approvers)
+  REJECTED                      // Rejected by any approver
+}
+
+model FormSubmission {
+  id       String           @id @default(uuid())
+  flowId   String
+  branchId String
+  userId   String
+  status   SubmissionStatus @default(DRAFT)
+  
+  // Current tab progress (0-based index)
+  currentTabIndex Int @default(0)
+  
+  // Form data stored as JSON
+  formData Json @default("{}")
+  
+  // Insurance Executive approval tracking
+  insuranceApprovalStatus String?    // "APPROVED", "REJECTED", "PENDING", null
+  insuranceApprovedById   String?    // ID of Insurance Executive who approved
+  insuranceApprovedAt     DateTime?
+  insuranceComments       String?
+  
+  // Timestamps
+  submittedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  flow     Flow       @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  branch   Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  insuranceApprovedBy User? @relation("InsuranceApprover", fields: [insuranceApprovedById], references: [id])
+  approvals Approval[]
+  history   FormHistory[]
+}
+
+model Approval {
+  id           String   @id @default(uuid())
+  submissionId String
+  managerId    String
+  status       SubmissionStatus
+  comments     String?
+  createdAt    DateTime @default(now())
+
+  submission FormSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  manager    User           @relation(fields: [managerId], references: [id], onDelete: Cascade)
+}
+
+// ==================== VEHICLE CATALOG (Cascading Dropdown Data) ====================
+
+model VehicleCatalog {
+  id        String   @id @default(uuid())
+  branchId  String
+  brand     String
+  model     String
+  variant   String
+  colour    String
+  fuelType  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId])
+  @@index([branchId, brand])
+  @@index([branchId, brand, model])
+  @@index([branchId, brand, model, variant])
+}
+
+// ==================== FORM HISTORY / AUDIT TRAIL ====================
+
+enum FormActionType {
+  CREATED                      // Form started
+  TAB_SAVED                    // Tab/section saved
+  SUBMITTED                    // Form submitted for approval
+  SUBMITTED_TO_INSURANCE       // Form submitted to Insurance Executive
+  INSURANCE_APPROVED           // Form approved by Insurance Executive
+  INSURANCE_REJECTED           // Form rejected by Insurance Executive
+  SUBMITTED_TO_MANAGER         // Form submitted to Manager (after insurance approval)
+  APPROVED                     // Form approved by manager
+  REJECTED                     // Form rejected by manager
+  RESUBMITTED                  // Form resubmitted after rejection
+  UPDATED                      // Form data updated
+}
+
+model FormHistory {
+  id           String         @id @default(uuid())
+  submissionId String
+  userId       String         // Who performed the action
+  actionType   FormActionType
+  tabIndex     Int?           // Which tab was saved (for TAB_SAVED action)
+  tabName      String?        // Tab name for reference
+  details      Json?          // Additional details (e.g., changed fields, comments)
+  ipAddress    String?        // Optional: track IP
+  userAgent    String?        // Optional: track browser/device
+  createdAt    DateTime       @default(now())
+
+  submission FormSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([userId])
+  @@index([createdAt])
+}
+

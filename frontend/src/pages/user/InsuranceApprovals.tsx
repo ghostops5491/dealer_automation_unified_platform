@@ -65,7 +65,7 @@ export function InsuranceApprovals() {
 
   const handleRunInsuranceJob = (submission: FormSubmission) => {
     // Try to get enquiry number from the submission data
-    const formData = submission.data as Record<string, any> || {};
+    const formData = submission.formData as Record<string, any> || {};
     const enquiryNo = formData?.enquiry_details?.enquiry_number || 
                       formData?.customer_details?.enquiry_number ||
                       formData?.enquiryNumber ||

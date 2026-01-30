@@ -5,6 +5,7 @@ import {
   runJobForLastEntry,
   runBookingJob,
   runEnquiryJob,
+  runInsuranceJob,
   getJobStatus,
   stopJob,
   getAllJobs
@@ -26,6 +27,9 @@ router.post('/run-booking', runBookingJob);
 
 // Run enquiry search job - available to all authenticated users
 router.post('/run-enquiry', runEnquiryJob);
+
+// Run insurance job - available to all authenticated users (Insurance Executive primarily)
+router.post('/run-insurance', runInsuranceJob);
 
 // Get all jobs - available to all authenticated users (for viewing their own job status)
 router.get('/', getAllJobs);

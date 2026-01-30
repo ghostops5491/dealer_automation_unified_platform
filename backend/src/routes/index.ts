@@ -11,6 +11,7 @@ import uploadRoutes from './upload.routes';
 import jobRoutes from './job.routes';
 import externalApiRoutes from './external-api.routes';
 import vehicleCatalogRoutes from './vehicle-catalog.routes';
+import otpConfigRoutes from './otp-config.routes';
 
 const router = Router();
 
@@ -26,6 +27,7 @@ router.use('/upload', uploadRoutes);
 router.use('/jobs', jobRoutes);
 router.use('/external', externalApiRoutes);
 router.use('/vehicle-catalog', vehicleCatalogRoutes);
+router.use('/otp-config', otpConfigRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

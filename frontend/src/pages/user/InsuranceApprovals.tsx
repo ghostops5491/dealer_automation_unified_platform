@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle2, XCircle, Eye, User, ShieldCheck, FileText, Edit } from 'lucide-react';
+import { CheckCircle2, XCircle, Eye, User, ShieldCheck, FileText, Edit, Play, Loader2 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
-import { formApi } from '@/lib/api';
+import { formApi, jobApi } from '@/lib/api';
 import { formatDateTime } from '@/lib/utils';
 import type { FormSubmission } from '@/types';
 
@@ -40,6 +40,43 @@ export function InsuranceApprovals() {
   const [selectedSubmission, setSelectedSubmission] = useState<FormSubmission | null>(null);
   const [actionType, setActionType] = useState<'approve' | 'reject' | null>(null);
   const [comments, setComments] = useState('');
+  const [runningInsuranceJob, setRunningInsuranceJob] = useState<string | null>(null);
+
+  // Insurance Job mutation
+  const insuranceJobMutation = useMutation({
+    mutationFn: ({ enquiryNo, submissionId }: { enquiryNo: string; submissionId: string }) =>
+      jobApi.runInsurance(enquiryNo, submissionId),
+    onSuccess: (response) => {
+      toast({
+        title: 'Insurance Job Started',
+        description: response.data?.message || 'Job has been started',
+      });
+      setRunningInsuranceJob(null);
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Cannot Run Insurance Job',
+        description: error.response?.data?.error || 'Failed to start insurance job',
+        variant: 'destructive',
+      });
+      setRunningInsuranceJob(null);
+    },
+  });
+
+  const handleRunInsuranceJob = (submission: FormSubmission) => {
+    // Try to get enquiry number from the submission data
+    const formData = submission.data as Record<string, any> || {};
+    const enquiryNo = formData?.enquiry_details?.enquiry_number || 
+                      formData?.customer_details?.enquiry_number ||
+                      formData?.enquiryNumber ||
+                      submission.id; // Fallback to submission ID
+    
+    setRunningInsuranceJob(submission.id);
+    insuranceJobMutation.mutate({ 
+      enquiryNo: String(enquiryNo), 
+      submissionId: submission.id 
+    });
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ['pending-insurance-approvals'],
@@ -152,7 +189,7 @@ export function InsuranceApprovals() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Button
                       variant="outline"
                       size="sm"
@@ -186,6 +223,25 @@ export function InsuranceApprovals() {
                     >
                       <XCircle className="h-4 w-4 mr-1" />
                       Reject
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="bg-purple-100 text-purple-700 hover:bg-purple-200 border border-purple-300"
+                      onClick={() => handleRunInsuranceJob(submission)}
+                      disabled={runningInsuranceJob === submission.id}
+                    >
+                      {runningInsuranceJob === submission.id ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                          Running...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="h-4 w-4 mr-1" />
+                          Perform Insurance
+                        </>
+                      )}
                     </Button>
                   </div>
                 </div>

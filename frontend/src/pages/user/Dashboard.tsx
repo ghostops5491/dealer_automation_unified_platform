@@ -1,17 +1,54 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
+import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/store/auth';
-import { flowApi, formApi } from '@/lib/api';
+import { flowApi, formApi, otpConfigApi } from '@/lib/api';
 import { formatDateTime, getStatusColor } from '@/lib/utils';
+import { useToast } from '@/hooks/use-toast';
 import type { Flow, FormSubmission } from '@/types';
 
 export function UserDashboard() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
+  const { toast } = useToast();
+  const [otpValue, setOtpValue] = useState('');
+  const [isUpdatingOtp, setIsUpdatingOtp] = useState(false);
+
+  // OTP mutation
+  const updateOtpMutation = useMutation({
+    mutationFn: (otp: string) => otpConfigApi.updateOtp(otp),
+    onSuccess: (_data, otp) => {
+      toast({ title: 'OTP Updated', description: `TVS OTP set to ${otp}` });
+      setIsUpdatingOtp(false);
+      setOtpValue('');
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Error',
+        description: error.response?.data?.error || 'Failed to update OTP',
+        variant: 'destructive',
+      });
+      setIsUpdatingOtp(false);
+    },
+  });
+
+  const handleOtpUpdate = () => {
+    if (!otpValue || !/^\d{4}$/.test(otpValue)) {
+      toast({
+        title: 'Invalid OTP',
+        description: 'OTP must be exactly 4 digits',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setIsUpdatingOtp(true);
+    updateOtpMutation.mutate(otpValue);
+  };
 
   const { data: flowsData } = useQuery({
     queryKey: ['my-flows'],
@@ -54,13 +91,40 @@ export function UserDashboard() {
 
   return (
     <div className="page-enter space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">
-          Welcome, {user?.firstName || user?.username}!
-        </h1>
-        <p className="text-muted-foreground">
-          {user?.branch?.name} • {user?.branch?.organization?.name}
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">
+            Welcome, {user?.firstName || user?.username}!
+          </h1>
+          <p className="text-muted-foreground">
+            {user?.branch?.name} • {user?.branch?.organization?.name}
+          </p>
+        </div>
+        
+        {/* TVS OTP Update - Top Right */}
+        <div className="flex items-center gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200 shadow-sm">
+          <Key className="h-4 w-4 text-amber-600" />
+          <span className="text-sm font-medium text-amber-800 whitespace-nowrap">TVS OTP:</span>
+          <Input
+            type="text"
+            maxLength={4}
+            placeholder="0000"
+            value={otpValue}
+            onChange={(e) => {
+              const value = e.target.value.replace(/\D/g, '').slice(0, 4);
+              setOtpValue(value);
+            }}
+            className="w-16 h-8 text-center font-mono text-sm px-1"
+          />
+          <Button
+            size="sm"
+            className="h-8 px-3 bg-amber-500 hover:bg-amber-600 text-white"
+            onClick={handleOtpUpdate}
+            disabled={isUpdatingOtp || !otpValue || otpValue.length !== 4}
+          >
+            {isUpdatingOtp ? '...' : 'Update'}
+          </Button>
+        </div>
       </div>
 
       {/* Stats */}

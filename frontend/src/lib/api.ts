@@ -308,6 +308,8 @@ export const jobApi = {
   runLastEntry: () => api.post('/jobs/run-last'),
   runBooking: (enquiryNo: string) => api.post('/jobs/run-booking', { enquiryNo }),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),
+  runInsurance: (enquiryNo: string, submissionId?: string) => 
+    api.post('/jobs/run-insurance', { enquiryNo, submissionId }),
   getAllJobs: () => api.get('/jobs'),
   getJobStatus: (jobId: string) => api.get(`/jobs/${jobId}`),
   stopJob: (jobId: string) => api.post(`/jobs/${jobId}/stop`),
@@ -356,4 +358,10 @@ export const vehicleCatalogApi = {
     api.get('/vehicle-catalog/colours', { params: { brand, model, variant } }),
   getFuelTypes: (brand: string, model: string, variant: string, colour: string) => 
     api.get('/vehicle-catalog/fuel-types', { params: { brand, model, variant, colour } }),
+};
+
+// OTP Configuration (for form_filling automation)
+export const otpConfigApi = {
+  getOtp: () => api.get('/otp-config'),
+  updateOtp: (otp: string) => api.put('/otp-config', { otp }),
 };

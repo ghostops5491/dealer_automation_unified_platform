@@ -143,6 +143,47 @@ export const runEnquiryJob = async (req: Request, res: Response) => {
   }
 };
 
+export const runInsuranceJob = async (req: Request, res: Response) => {
+  try {
+    const { enquiryNo, submissionId } = req.body;
+    
+    if (!enquiryNo) {
+      return res.status(400).json({
+        success: false,
+        error: 'enquiryNo is required'
+      });
+    }
+    
+    console.log(`Forwarding run-insurance request to job runner: ${JOB_RUNNER_URL}/jobs/run-insurance`);
+    console.log(`Enquiry No: ${enquiryNo}, Submission ID: ${submissionId}`);
+    
+    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-insurance`, 
+      { enquiryNo, submissionId },
+      {
+        timeout: 10000,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    
+    res.json(response.data);
+  } catch (error: any) {
+    console.error('Error calling job runner:', error.message);
+    
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({
+        success: false,
+        error: 'Job Runner service is not running. Please start job_runner.py on your Windows machine.',
+        hint: 'Run: python C:\\Users\\yashc\\Desktop\\Auto_Unified_Platform\\job_runner\\job_runner.py'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: error.response?.data?.error || error.message || 'Failed to start insurance job'
+    });
+  }
+};
+
 export const getJobStatus = async (req: Request, res: Response) => {
   try {
     const { jobId } = req.params;

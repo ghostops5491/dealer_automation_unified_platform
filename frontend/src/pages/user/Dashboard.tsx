@@ -1,11 +1,21 @@
 import { useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key } from 'lucide-react';
+import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key, Trash2, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useAuthStore } from '@/store/auth';
 import { flowApi, formApi, otpConfigApi } from '@/lib/api';
 import { formatDateTime, getStatusColor } from '@/lib/utils';
@@ -16,8 +26,10 @@ export function UserDashboard() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [otpValue, setOtpValue] = useState('');
   const [isUpdatingOtp, setIsUpdatingOtp] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<FormSubmission | null>(null);
 
   // OTP mutation
   const updateOtpMutation = useMutation({
@@ -49,6 +61,24 @@ export function UserDashboard() {
     setIsUpdatingOtp(true);
     updateOtpMutation.mutate(otpValue);
   };
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => formApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my-submissions'] });
+      queryClient.invalidateQueries({ queryKey: ['branch-stats'] });
+      toast({ title: 'Draft deleted successfully' });
+      setDeleteTarget(null);
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Error',
+        description: error.response?.data?.error || 'Failed to delete draft',
+        variant: 'destructive',
+      });
+      setDeleteTarget(null);
+    },
+  });
 
   const { data: flowsData } = useQuery({
     queryKey: ['my-flows'],
@@ -137,7 +167,10 @@ export function UserDashboard() {
         )}
       </div>
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Card className="hover:shadow-md transition-shadow">
+        <Card
+          className="hover:shadow-md transition-shadow cursor-pointer hover:ring-2 hover:ring-gray-300"
+          onClick={() => navigate('/dashboard/submissions?status=DRAFT')}
+        >
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Drafts</CardTitle>
             <FileText className="h-4 w-4 text-gray-500" />
@@ -146,7 +179,10 @@ export function UserDashboard() {
             <div className="text-3xl font-bold">{draftCount}</div>
           </CardContent>
         </Card>
-        <Card className="hover:shadow-md transition-shadow">
+        <Card
+          className="hover:shadow-md transition-shadow cursor-pointer hover:ring-2 hover:ring-yellow-300"
+          onClick={() => navigate('/dashboard/submissions?status=PENDING')}
+        >
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Pending</CardTitle>
             <Clock className="h-4 w-4 text-yellow-500" />
@@ -155,7 +191,10 @@ export function UserDashboard() {
             <div className="text-3xl font-bold text-yellow-600">{pendingCount}</div>
           </CardContent>
         </Card>
-        <Card className="hover:shadow-md transition-shadow">
+        <Card
+          className="hover:shadow-md transition-shadow cursor-pointer hover:ring-2 hover:ring-green-300"
+          onClick={() => navigate('/dashboard/submissions?status=APPROVED')}
+        >
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Approved</CardTitle>
             <CheckCircle2 className="h-4 w-4 text-green-500" />
@@ -164,7 +203,10 @@ export function UserDashboard() {
             <div className="text-3xl font-bold text-green-600">{approvedCount}</div>
           </CardContent>
         </Card>
-        <Card className="hover:shadow-md transition-shadow">
+        <Card
+          className="hover:shadow-md transition-shadow cursor-pointer hover:ring-2 hover:ring-red-300"
+          onClick={() => navigate('/dashboard/submissions?status=REJECTED')}
+        >
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Rejected</CardTitle>
             <XCircle className="h-4 w-4 text-red-500" />
@@ -285,9 +327,24 @@ export function UserDashboard() {
                         {formatDateTime(submission.updatedAt)}
                       </p>
                     </div>
-                    <Badge className={getStatusColor(submission.status)}>
-                      {submission.status.replace('_', ' ')}
-                    </Badge>
+                    <div className="flex items-center gap-2">
+                      <Badge className={getStatusColor(submission.status)}>
+                        {submission.status.replace('_', ' ')}
+                      </Badge>
+                      {submission.status === 'DRAFT' && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteTarget(submission);
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 ))}
                 {submissions.length > 5 && (
@@ -304,6 +361,36 @@ export function UserDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Delete Draft Confirmation Dialog */}
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Draft</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this draft for "{deleteTarget?.flow?.name}"?
+              This action cannot be undone and all saved data will be permanently lost.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

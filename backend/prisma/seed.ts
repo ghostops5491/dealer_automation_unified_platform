@@ -143,13 +143,24 @@ async function main() {
     data: [
       {
         screenId: customerEnquiryScreen.id,
+        name: 'company_brand',
+        label: 'Company / Brand',
+        fieldType: 'TEXT',
+        placeholder: 'Vehicle brand/company',
+        isRequired: false,
+        isReadOnly: true,
+        defaultValue: 'TVS',
+        sortOrder: 1,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
         name: 'enquiry_no',
         label: 'Enquiry No',
         fieldType: 'TEXT',
         placeholder: 'Auto-generated',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 1,
+        sortOrder: 2,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -164,7 +175,37 @@ async function main() {
           { value: 'referral', label: 'Referral' },
           { value: 'online', label: 'Online' },
         ]),
-        sortOrder: 2,
+        sortOrder: 3,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'enquiry_status',
+        label: 'Enquiry Status',
+        fieldType: 'TEXT',
+        placeholder: 'Status from external system',
+        isRequired: false,
+        isReadOnly: true,
+        sortOrder: 4,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'vehicle_model',
+        label: 'Model of Vehicle',
+        fieldType: 'TEXT',
+        placeholder: 'Model from enquiry',
+        isRequired: false,
+        isReadOnly: true,
+        sortOrder: 5,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'sale_mode',
+        label: 'Sale Mode',
+        fieldType: 'TEXT',
+        placeholder: 'Sale mode from enquiry',
+        isRequired: false,
+        isReadOnly: true,
+        sortOrder: 6,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -176,7 +217,7 @@ async function main() {
           { value: 'individual', label: 'Individual' },
           { value: 'company', label: 'Company' },
         ]),
-        sortOrder: 3,
+        sortOrder: 7,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -190,7 +231,7 @@ async function main() {
           { value: 'ms', label: 'Ms.' },
           { value: 'dr', label: 'Dr.' },
         ]),
-        sortOrder: 4,
+        sortOrder: 8,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -201,7 +242,7 @@ async function main() {
         isRequired: true,
         validationRegex: '^[a-zA-Z\\s]{2,50}$',
         validationMessage: 'First name must contain only letters (2-50 characters)',
-        sortOrder: 5,
+        sortOrder: 9,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -212,7 +253,7 @@ async function main() {
         isRequired: false,
         validationRegex: '^[a-zA-Z\\s]{0,50}$',
         validationMessage: 'Last name must contain only letters (max 50 characters)',
-        sortOrder: 6,
+        sortOrder: 10,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -220,7 +261,7 @@ async function main() {
         label: 'Date of Birth',
         fieldType: 'DATE',
         isRequired: false,
-        sortOrder: 7,
+        sortOrder: 11,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -231,18 +272,27 @@ async function main() {
         isRequired: true,
         validationRegex: '^[6-9][0-9]{9}$',
         validationMessage: 'Mobile number must be 10 digits starting with 6-9',
-        sortOrder: 8,
+        sortOrder: 12,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'registered_user',
+        label: 'Registered User',
+        fieldType: 'TEXT',
+        placeholder: 'End user / registered user name',
+        isRequired: false,
+        sortOrder: 13,
       },
       {
         screenId: customerEnquiryScreen.id,
         name: 'rep_name',
-        label: 'Rep Name',
+        label: 'Sales Rep Name',
         fieldType: 'TEXT',
-        placeholder: 'Enter representative name',
-        isRequired: true,
+        placeholder: 'Enter sales representative name',
+        isRequired: false,
         validationRegex: '^[a-zA-Z\\s]{2,50}$',
         validationMessage: 'Rep name must contain only letters',
-        sortOrder: 9,
+        sortOrder: 14,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -250,10 +300,8 @@ async function main() {
         label: 'Rep Relation',
         fieldType: 'TEXT',
         placeholder: 'Enter relationship',
-        isRequired: true,
-        validationRegex: '^[a-zA-Z\\s]{2,50}$',
-        validationMessage: 'Relation must contain only letters',
-        sortOrder: 10,
+        isRequired: false,
+        sortOrder: 15,
       },
       {
         screenId: customerEnquiryScreen.id,
@@ -261,15 +309,15 @@ async function main() {
         label: 'Executive Name',
         fieldType: 'TEXT',
         placeholder: 'Enter executive name',
-        isRequired: true,
+        isRequired: false,
         validationRegex: '^[a-zA-Z\\s]{2,50}$',
         validationMessage: 'Executive name must contain only letters',
-        sortOrder: 11,
+        sortOrder: 16,
       },
     ],
   });
 
-  console.log('✅ Screen 1 created: Customer & Enquiry');
+  console.log('✅ Screen 1 created: Customer & Enquiry (16 fields)');
 
   // ============================================
   // SCREEN 2: Address and More Details
@@ -659,10 +707,37 @@ async function main() {
         isRequired: false,
         sortOrder: 12,
       },
+      {
+        screenId: vehicleScreen.id,
+        name: 'customer_id',
+        label: 'Customer ID',
+        fieldType: 'TEXT',
+        placeholder: 'From pre-booking data',
+        isRequired: false,
+        sortOrder: 13,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'rto_state',
+        label: 'RTO State',
+        fieldType: 'TEXT',
+        placeholder: 'State shortform for RTO',
+        isRequired: false,
+        sortOrder: 14,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'model_id',
+        label: 'Model ID',
+        fieldType: 'TEXT',
+        placeholder: 'Internal model ID',
+        isRequired: false,
+        sortOrder: 99,
+      },
     ],
   });
 
-  console.log('✅ Screen 3 created: Vehicle Details');
+  console.log('✅ Screen 3 created: Vehicle Details (15 fields)');
 
   // ============================================
   // SCREEN 4: Amounts & Tax
@@ -872,10 +947,66 @@ async function main() {
         defaultValue: 'na',
         sortOrder: 15,
       },
+      {
+        screenId: amountsScreen.id,
+        name: 'ex_showroom_price',
+        label: 'EX ShowRoom Price',
+        fieldType: 'NUMBER',
+        placeholder: 'EX showroom price',
+        isRequired: false,
+        sortOrder: 16,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'tax_amount',
+        label: 'Tax Amount',
+        fieldType: 'NUMBER',
+        placeholder: 'Tax amount',
+        isRequired: false,
+        sortOrder: 17,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'cgst_line',
+        label: 'CGST',
+        fieldType: 'TEXT',
+        placeholder: 'CGST details',
+        isRequired: false,
+        isReadOnly: true,
+        sortOrder: 18,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'sgst_line',
+        label: 'SGST',
+        fieldType: 'TEXT',
+        placeholder: 'SGST details',
+        isRequired: false,
+        isReadOnly: true,
+        sortOrder: 19,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'booked_qty',
+        label: 'Booked Qty',
+        fieldType: 'NUMBER',
+        placeholder: 'Booked quantity',
+        isRequired: false,
+        sortOrder: 20,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'pending_qty',
+        label: 'Pending Qty',
+        fieldType: 'NUMBER',
+        placeholder: 'Pending quantity',
+        isRequired: false,
+        sortOrder: 21,
+      },
     ],
   });
 
-  console.log('✅ Screen 4 created: Amounts & Tax');
+  console.log('✅ Screen 4 created: Amounts & Tax (21 fields)');
 
   // ============================================
   // SCREEN 5: Insurance, Nominee & Demographics
@@ -1701,7 +1832,7 @@ async function main() {
 
   console.log('\n🎉 Seed completed successfully!');
   console.log('\n📋 Screens Created:');
-  console.log('   1. Customer & Enquiry (11 fields)');
+  console.log('   1. Customer & Enquiry (16 fields)');
   console.log('   2. Address and More Details (15 fields)');
   console.log('   3. Vehicle Details (12 fields)');
   console.log('   4. Amounts & Tax (15 fields)');

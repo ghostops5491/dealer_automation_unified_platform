@@ -467,6 +467,15 @@ export const saveTabData = async (
       }
     }
 
+    // Cross-field validation: either rep_name or executive_name must be provided for customer_enquiry
+    if (flowScreen.screen.code === 'customer_enquiry') {
+      const repName = data['rep_name']?.toString().trim();
+      const execName = data['executive_name']?.toString().trim();
+      if (!repName && !execName) {
+        validationErrors.push('Either Sales Rep Name or Executive Name is required');
+      }
+    }
+
     if (validationErrors.length > 0) {
       res.status(400).json({
         success: false,

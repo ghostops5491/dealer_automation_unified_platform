@@ -1,5 +1,7 @@
 import { Response } from 'express';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { AuthRequest } from '../types';
 
@@ -50,6 +52,8 @@ interface TVSEnquiry {
   END_USER: string;
   STATUS_DESC: string;
   CUSTOMER_ID: number;
+  ENQUIRY_DESCRIPTION: string;
+  Booked: number;
 }
 
 // Store tokens in memory with expiration (simple cache)
@@ -58,20 +62,25 @@ const tokenCache: Map<string, { token: string; expiresAt: Date }> = new Map();
 // Map TVS API response to CRM form fields
 // Note: Field names must match exactly with the screen field names defined in seed.ts
 function mapTVSResponseToCRM(enquiry: TVSEnquiry): Record<string, any> {
-  // Parse customer name into first and last name
   const fullName = enquiry.CUST_NAME?.trim() || '';
   const nameParts = fullName.split(' ');
   const firstName = nameParts[0] || '';
   const lastName = nameParts.slice(1).join(' ') || '';
   
   return {
-    // Customer Enquiry screen fields (matching seed.ts field names)
+    // Customer Enquiry screen fields
+    'customer_enquiry.company_brand': 'TVS',
     'customer_enquiry.enquiry_no': enquiry.ENQUIRY_NO?.toString() || '',
+    'customer_enquiry.enquiry': enquiry.ENQUIRY_DESCRIPTION || '',
+    'customer_enquiry.enquiry_status': enquiry.STATUS_DESC || '',
+    'customer_enquiry.vehicle_model': enquiry.MODEL || '',
     'customer_enquiry.first_name': firstName,
     'customer_enquiry.last_name': lastName,
     'customer_enquiry.mobile_no': enquiry.CONTACT_NO || '',
     'customer_enquiry.ownership_type': enquiry.CUST_TYPE?.toLowerCase() || 'individual',
-    'customer_enquiry.executive_name': enquiry.SALES_PERSON?.trim() || '',
+    'customer_enquiry.sale_mode': enquiry.SALE_MODE_DESCRIPTION || '',
+    'customer_enquiry.rep_name': enquiry.SALES_PERSON?.trim() || '',
+    'customer_enquiry.registered_user': enquiry.END_USER?.trim() || '',
     
     // Vehicle Details screen fields
     'vehicle_details.model': enquiry.MODEL || '',
@@ -79,13 +88,15 @@ function mapTVSResponseToCRM(enquiry: TVSEnquiry): Record<string, any> {
     // Amounts & Tax screen fields
     'amounts_tax.payment_mode': mapPaymentMode(enquiry.SALE_MODE_DESCRIPTION),
     
-    // Additional metadata (won't be displayed but useful for tracking)
+    // Metadata
     '_source': 'TVS_API',
     '_fetched_at': new Date().toISOString(),
     '_enquiry_id': enquiry.ENQUIRY_ID?.toString() || '',
     '_customer_id': enquiry.CUSTOMER_ID?.toString() || '',
     '_status': enquiry.STATUS_DESC || '',
-    '_enquiry_date': enquiry.ENQUIRY_DATE?.split('T')[0] || ''
+    '_enquiry_date': enquiry.ENQUIRY_DATE?.split('T')[0] || '',
+    '_booked': enquiry.Booked ?? 0,
+    '_enquiry_description': enquiry.ENQUIRY_DESCRIPTION || '',
   };
 }
 
@@ -328,7 +339,9 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
           mobile: e.CONTACT_NO,
           model: e.MODEL,
           status: e.STATUS_DESC,
-          date: e.ENQUIRY_DATE
+          date: e.ENQUIRY_DATE,
+          booked: e.Booked ?? 0,
+          enquiryDescription: e.ENQUIRY_DESCRIPTION || '',
         }))
       });
     }
@@ -488,6 +501,135 @@ export const fetchEnquiryById = async (req: AuthRequest, res: Response) => {
       success: false,
       error: error.message || 'Failed to fetch enquiry'
     });
+  }
+};
+
+// Pre-fetch booking data using SearchEnquiry (same proven API as Fetch Details)
+// Maps response to amounts_tax fields for pre-filling
+export const preFetchBookingData = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryNo, authToken } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated' });
+    }
+
+    if (!enquiryNo) {
+      return res.status(400).json({ success: false, error: 'Enquiry number is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const branch = user.branch;
+
+    if (!branch.dealerId || !branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    if (!user.externalUserId) {
+      return res.status(400).json({ success: false, error: 'User External User ID not configured' });
+    }
+
+    // Get or generate token
+    let token = authToken;
+    if (!token) {
+      if (!user.externalLoginId || !user.externalRoleId) {
+        return res.status(400).json({ success: false, error: 'Cannot auto-generate token. Configure External Login ID and Role ID.' });
+      }
+      try {
+        token = await generateTVSToken(
+          branch.dealerId,
+          branch.externalBranchId,
+          user.externalRoleId,
+          user.externalLoginId,
+          user.externalUserId
+        );
+      } catch (tokenError: any) {
+        return res.status(400).json({ success: false, error: `Token generation failed: ${tokenError.message}` });
+      }
+    }
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'No auth token available' });
+    }
+
+    // Use the same SearchEnquiry API that Fetch Details uses
+    const endpoint = API_ENDPOINTS[branch.branchType]?.searchEnquiry;
+    if (!endpoint) {
+      return res.status(400).json({ success: false, error: `API endpoint not configured for branch type: ${branch.branchType}` });
+    }
+
+    const fromDate = new Date();
+    fromDate.setFullYear(fromDate.getFullYear() - 1);
+    const toDate = new Date();
+    toDate.setDate(toDate.getDate() + 7);
+
+    const searchRequest: TVSSearchRequest = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      FROM_DT: fromDate.toISOString(),
+      TO_DT: toDate.toISOString(),
+      ENQUIRY_NO: parseInt(enquiryNo),
+      CONTACT_NO: null,
+      CUST_NAME: null,
+      USER_ID: user.externalUserId,
+      COUNTRY_CODE: branch.countryCode || 'IN',
+    };
+
+    console.log('Pre-fetch booking via SearchEnquiry:', JSON.stringify(searchRequest, null, 2));
+
+    const response = await axios.post(endpoint, searchRequest, {
+      headers: {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json, text/plain, */*',
+      },
+      timeout: 30000,
+    });
+
+    if (response.data.statusCode !== 200 || !response.data.data?.EnquiryList?.length) {
+      return res.status(404).json({ success: false, error: 'Enquiry not found' });
+    }
+
+    const enquiry: TVSEnquiry = response.data.data.EnquiryList[0];
+
+    // Map to amounts_tax fields
+    const mappedData: Record<string, any> = {
+      'amounts_tax.payment_mode': mapPaymentMode(enquiry.SALE_MODE_DESCRIPTION),
+    };
+
+    // Include all available enquiry data for reference
+    mappedData['_source'] = 'TVS_API_PREFETCH';
+    mappedData['_fetched_at'] = new Date().toISOString();
+    mappedData['_raw_keys'] = Object.keys(enquiry);
+
+    res.json({
+      success: true,
+      data: mappedData,
+      rawData: enquiry,
+    });
+
+  } catch (error: any) {
+    console.error('Error pre-fetching booking data:', error);
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) {
+        return res.status(401).json({ success: false, error: 'Invalid or expired token. Will regenerate on next request.' });
+      }
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to pre-fetch booking data' });
   }
 };
 
@@ -659,5 +801,411 @@ export const clearTokenCache = async (req: AuthRequest, res: Response) => {
       success: false,
       error: error.message
     });
+  }
+};
+
+// Enquiry cache directory
+const ENQUIRY_CACHE_DIR = path.join(process.cwd(), 'uploads', 'enquiry-cache');
+
+function ensureEnquiryCacheDir() {
+  if (!fs.existsSync(ENQUIRY_CACHE_DIR)) {
+    fs.mkdirSync(ENQUIRY_CACHE_DIR, { recursive: true });
+  }
+}
+
+// Populate enquiry details by ID via TVS API and cache the response as a JSON file
+export const populateEnquiryById = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated' });
+    }
+
+    if (!enquiryId) {
+      return res.status(400).json({ success: false, error: 'Enquiry ID is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const branch = user.branch;
+
+    if (!branch.dealerId || !branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    if (!user.externalUserId) {
+      return res.status(400).json({ success: false, error: 'User External User ID not configured' });
+    }
+
+    // Generate token
+    let token: string | undefined;
+    if (user.externalLoginId && user.externalRoleId) {
+      try {
+        token = await generateTVSToken(
+          branch.dealerId,
+          branch.externalBranchId,
+          user.externalRoleId,
+          user.externalLoginId,
+          user.externalUserId
+        );
+      } catch (tokenError: any) {
+        return res.status(400).json({ success: false, error: `Token generation failed: ${tokenError.message}` });
+      }
+    }
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Cannot generate auth token. Configure External Login ID and Role ID.' });
+    }
+
+    // Call PopulateEnquiryDetailsById (GET with query params)
+    const apiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/PopulateEnquiryDetailsById';
+
+    console.log(`PopulateEnquiryDetailsById: DealerId=${branch.dealerId}, BranchId=${branch.externalBranchId}, EnqId=${enquiryId}`);
+
+    const response = await axios.get(apiUrl, {
+      params: {
+        DealerId: branch.dealerId,
+        BranchId: branch.externalBranchId,
+        EnqId: parseInt(enquiryId),
+      },
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.advantagetvs.in',
+        'Referer': 'https://www.advantagetvs.in/LiteApp/',
+      },
+      timeout: 30000,
+    });
+
+    console.log('PopulateEnquiryDetailsById response status:', response.data?.statusCode);
+
+    const responseData = response.data;
+
+    // Save response to file keyed by enquiryId
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `${enquiryId}.json`);
+    const cachePayload = {
+      enquiryId: String(enquiryId),
+      dealerId: branch.dealerId,
+      branchId: branch.externalBranchId,
+      fetchedBy: user.username,
+      fetchedAt: new Date().toISOString(),
+      response: responseData,
+    };
+
+    fs.writeFileSync(cacheFile, JSON.stringify(cachePayload, null, 2), 'utf-8');
+    console.log(`Enquiry data cached: ${cacheFile}`);
+
+    res.json({
+      success: true,
+      data: responseData?.data || responseData,
+      cachedAs: `${enquiryId}.json`,
+    });
+
+  } catch (error: any) {
+    console.error('Error in populateEnquiryById:', error);
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) {
+        return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+      }
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to fetch enquiry details' });
+  }
+};
+
+// Get cached enquiry data by enquiryId (read from file)
+export const getCachedEnquiry = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryId } = req.params;
+
+    if (!enquiryId) {
+      return res.status(400).json({ success: false, error: 'Enquiry ID is required' });
+    }
+
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `${enquiryId}.json`);
+
+    if (!fs.existsSync(cacheFile)) {
+      return res.status(404).json({ success: false, error: 'No cached data found for this enquiry' });
+    }
+
+    const raw = fs.readFileSync(cacheFile, 'utf-8');
+    const cached = JSON.parse(raw);
+
+    res.json({ success: true, data: cached });
+
+  } catch (error: any) {
+    console.error('Error reading cached enquiry:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to read cached data' });
+  }
+};
+
+// List all cached enquiry files
+export const listCachedEnquiries = async (req: AuthRequest, res: Response) => {
+  try {
+    ensureEnquiryCacheDir();
+    const files = fs.readdirSync(ENQUIRY_CACHE_DIR).filter(f => f.endsWith('.json'));
+
+    const entries = files.map(f => {
+      try {
+        const raw = fs.readFileSync(path.join(ENQUIRY_CACHE_DIR, f), 'utf-8');
+        const data = JSON.parse(raw);
+        return {
+          enquiryId: data.enquiryId,
+          fetchedBy: data.fetchedBy,
+          fetchedAt: data.fetchedAt,
+          filename: f,
+        };
+      } catch {
+        return { enquiryId: f.replace('.json', ''), filename: f };
+      }
+    });
+
+    res.json({ success: true, data: entries, count: entries.length });
+
+  } catch (error: any) {
+    console.error('Error listing cached enquiries:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// Fetch pre-booking data via SelectedEnquiryByID with full booking body
+// Defaults for now: INS_COMP_ID=4, INS_TYPE_ID=3, REG_TYPE_ID=1, RTO_ID=142713
+const PRE_BOOKING_DEFAULTS = {
+  INS_COMP_ID: 4,
+  INS_TYPE_ID: 3,
+  REG_TYPE_ID: 1,
+  RTO_ID: 142713,
+  DealerCountry: 'IN',
+  DealerState: 'TG',
+};
+
+export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated' });
+    }
+
+    if (!enquiryId) {
+      return res.status(400).json({ success: false, error: 'Enquiry ID is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const branch = user.branch;
+
+    if (!branch.dealerId || !branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    if (!user.externalUserId) {
+      return res.status(400).json({ success: false, error: 'User External User ID not configured' });
+    }
+
+    // Generate token
+    let token: string | undefined;
+    if (user.externalLoginId && user.externalRoleId) {
+      try {
+        token = await generateTVSToken(
+          branch.dealerId,
+          branch.externalBranchId,
+          user.externalRoleId,
+          user.externalLoginId,
+          user.externalUserId
+        );
+      } catch (tokenError: any) {
+        return res.status(400).json({ success: false, error: `Token generation failed: ${tokenError.message}` });
+      }
+    }
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Cannot generate auth token' });
+    }
+
+    const requestBody = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      ENQUIRY_ID: String(enquiryId),
+      DealerCountry: branch.countryCode || PRE_BOOKING_DEFAULTS.DealerCountry,
+      DealerState: PRE_BOOKING_DEFAULTS.DealerState,
+      INS_COMP_ID: PRE_BOOKING_DEFAULTS.INS_COMP_ID,
+      INS_TYPE_ID: PRE_BOOKING_DEFAULTS.INS_TYPE_ID,
+      REG_TYPE_ID: PRE_BOOKING_DEFAULTS.REG_TYPE_ID,
+      RTO_ID: PRE_BOOKING_DEFAULTS.RTO_ID,
+    };
+
+    console.log('SelectedEnquiryByID (Pre-Booking) request:', JSON.stringify(requestBody, null, 2));
+
+    const apiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SelectedEnquiryByID';
+    const response = await axios.post(apiUrl, requestBody, {
+      headers: {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.advantagetvs.in',
+        'Referer': 'https://www.advantagetvs.in/LiteApp/',
+      },
+      timeout: 30000,
+    });
+
+    console.log('SelectedEnquiryByID (Pre-Booking) response statusCode:', response.data?.statusCode);
+
+    const responseData = response.data;
+    const rawData = responseData?.data || responseData;
+
+    // Save response to file: pre-booking-{enquiryId}.json
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+    const cachePayload = {
+      enquiryId: String(enquiryId),
+      type: 'pre-booking',
+      dealerId: branch.dealerId,
+      branchId: branch.externalBranchId,
+      requestBody,
+      fetchedBy: user.username,
+      fetchedAt: new Date().toISOString(),
+      response: responseData,
+    };
+
+    fs.writeFileSync(cacheFile, JSON.stringify(cachePayload, null, 2), 'utf-8');
+    console.log(`Pre-booking data cached: ${cacheFile}`);
+
+    // Debug: Log the response structure to understand nesting
+    console.log('Pre-booking rawData type:', typeof rawData);
+    console.log('Pre-booking rawData top-level keys:', rawData ? Object.keys(rawData) : 'null');
+    if (rawData?.BookingPartDetails) {
+      console.log('BookingPartDetails found, length:', rawData.BookingPartDetails.length);
+      if (rawData.BookingPartDetails[0]) {
+        console.log('BookingPartDetails[0] keys:', Object.keys(rawData.BookingPartDetails[0]));
+      }
+    }
+    if (rawData?.TaxDetails) {
+      console.log('TaxDetails found, length:', rawData.TaxDetails.length);
+      if (rawData.TaxDetails[0]) {
+        console.log('TaxDetails[0] keys:', Object.keys(rawData.TaxDetails[0]));
+        console.log('TaxDetails[0] sample:', JSON.stringify(rawData.TaxDetails[0]));
+      }
+    }
+
+    // Try multiple nesting levels to find the booking data
+    const booking = rawData?.BookingPartDetails?.[0] || rawData;
+
+    // Helper: search for a field across multiple possible locations in the API response
+    function findField(fieldName: string): any {
+      if (rawData?.BookingPartDetails?.[0]?.[fieldName] !== undefined) return rawData.BookingPartDetails[0][fieldName];
+      if (rawData?.[fieldName] !== undefined) return rawData[fieldName];
+      if (rawData?.Customer?.[fieldName] !== undefined) return rawData.Customer[fieldName];
+      if (rawData?.Enquiry?.[fieldName] !== undefined) return rawData.Enquiry[fieldName];
+      if (rawData?.EnquiryList?.[0]?.[fieldName] !== undefined) return rawData.EnquiryList[0][fieldName];
+      return undefined;
+    }
+
+    // Find tax details — API returns BookingPartTaxList (not TaxDetails)
+    const taxDetails: any[] =
+      rawData?.BookingPartDetails?.[0]?.BookingPartTaxList ||
+      rawData?.BookingPartDetails?.[0]?.TaxDetails ||
+      rawData?.TaxDetails ||
+      booking?.TaxDetails ||
+      [];
+
+    const mappedFields: Record<string, any> = {};
+
+    // Vehicle Details fields
+    const customerId = findField('CUSTOMER_ID');
+    const modelId = findField('MODEL_ID');
+    const comStateId = findField('COM_STATE_ID');
+    if (customerId !== undefined) mappedFields['vehicle_details.customer_id'] = String(customerId);
+    if (modelId !== undefined) mappedFields['vehicle_details.model_id'] = String(modelId);
+    if (comStateId !== undefined) mappedFields['vehicle_details.rto_state'] = String(comStateId);
+
+    // Amounts & Tax fields
+    const unitPrice = findField('UNIT_PRICE');
+    const exShrmPrice = findField('EX_SHRM_PRICE');
+    const taxAmount = findField('TAX_AMOUNT');
+    const totalAmount = findField('TOTAL_AMOUNT');
+    const bookedQty = findField('BOOKED_QTY');
+    const pendingQty = findField('PENDING_QTY');
+
+    if (unitPrice !== undefined) mappedFields['amounts_tax.base_amount'] = unitPrice;
+    if (exShrmPrice !== undefined) mappedFields['amounts_tax.ex_showroom_price'] = exShrmPrice;
+    if (taxAmount !== undefined) mappedFields['amounts_tax.tax_amount'] = taxAmount;
+    if (totalAmount !== undefined) mappedFields['amounts_tax.total_amount'] = totalAmount;
+    if (bookedQty !== undefined) mappedFields['amounts_tax.booked_qty'] = bookedQty;
+    if (pendingQty !== undefined) mappedFields['amounts_tax.pending_qty'] = pendingQty;
+
+    // Extract CGST and SGST from tax details array
+    const cgst = taxDetails.find((t: any) =>
+      t.DESCRIPTION === 'CGST' || t.TAX_TYPE === 'CGST' || t.TAX_NAME?.includes('CGST') || t.TaxType === 'CGST' || t.TaxName?.includes('CGST')
+    );
+    const sgst = taxDetails.find((t: any) =>
+      t.DESCRIPTION === 'SGST' || t.TAX_TYPE === 'SGST' || t.TAX_NAME?.includes('SGST') || t.TaxType === 'SGST' || t.TaxName?.includes('SGST')
+    );
+
+    if (cgst) {
+      const perc = cgst.TAX_PERC ?? cgst.TAX_PERCENTAGE ?? cgst.TaxPerc ?? cgst.TaxPercentage ?? 0;
+      const applied = cgst.APPLIED_AMT ?? cgst.APPLIED_AMOUNT ?? cgst.AppliedAmt ?? cgst.AppliedAmount ?? 0;
+      const taxVal = cgst.TaxValue ?? cgst.TAX_VALUE ?? cgst.TAX_AMOUNT ?? cgst.TaxAmount ?? 0;
+      mappedFields['amounts_tax.cgst_line'] = `CGST = ${perc}% on ${applied} = ${taxVal}`;
+      mappedFields['_cgst_perc'] = perc;
+      mappedFields['_cgst_applied'] = applied;
+      mappedFields['_cgst_value'] = taxVal;
+    }
+
+    if (sgst) {
+      const perc = sgst.TAX_PERC ?? sgst.TAX_PERCENTAGE ?? sgst.TaxPerc ?? sgst.TaxPercentage ?? 0;
+      const applied = sgst.APPLIED_AMT ?? sgst.APPLIED_AMOUNT ?? sgst.AppliedAmt ?? sgst.AppliedAmount ?? 0;
+      const taxVal = sgst.TaxValue ?? sgst.TAX_VALUE ?? sgst.TAX_AMOUNT ?? sgst.TaxAmount ?? 0;
+      mappedFields['amounts_tax.sgst_line'] = `SGST = ${perc}% on ${applied} = ${taxVal}`;
+      mappedFields['_sgst_perc'] = perc;
+      mappedFields['_sgst_applied'] = applied;
+      mappedFields['_sgst_value'] = taxVal;
+    }
+
+    console.log('Pre-booking mappedFields:', JSON.stringify(mappedFields, null, 2));
+
+    res.json({
+      success: true,
+      data: rawData,
+      mappedFields,
+      cachedAs: `pre-booking-${enquiryId}.json`,
+    });
+
+  } catch (error: any) {
+    console.error('Error in fetchPreBooking:', error);
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) {
+        return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+      }
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to fetch pre-booking data' });
   }
 };

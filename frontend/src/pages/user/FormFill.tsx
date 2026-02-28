@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -67,6 +67,30 @@ export function FormFill() {
   const [, setBookingJobId] = useState<string | null>(null);
   const [bookingJobStatus, setBookingJobStatus] = useState<string | null>(null);
   const [bookingLoading, setBookingLoading] = useState(false);
+  const [isBookedEnquiry, setIsBookedEnquiry] = useState(false);
+  const [showBookingConfirm, setShowBookingConfirm] = useState(false);
+  
+  // Dynamic options added from API response (e.g. ENQUIRY_DESCRIPTION)
+  const [dynamicEnquiryOptions, setDynamicEnquiryOptions] = useState<{ value: string; label: string }[]>([]);
+  
+  // Pre-fetch booking data state
+  const [preFetchLoading, setPreFetchLoading] = useState(false);
+  const [preFetchDone, setPreFetchDone] = useState(false);
+  
+  // Populate enquiry details state
+  const [populateLoading, setPopulateLoading] = useState(false);
+  const [populateDone, setPopulateDone] = useState(false);
+  
+  // Pre-booking (SelectedEnquiryByID) state
+  const [preBookingLoading, setPreBookingLoading] = useState(false);
+  const [preBookingDone, setPreBookingDone] = useState(false);
+  
+  // CGST/SGST metadata for cross-check validation
+  const [cgstMeta, setCgstMeta] = useState<{ perc: number; applied: number; value: number } | null>(null);
+  const [sgstMeta, setSgstMeta] = useState<{ perc: number; applied: number; value: number } | null>(null);
+  
+  // Model ID visibility toggle
+  const [showModelId, setShowModelId] = useState(false);
   
   // Enquiry Job state
   const [, setEnquiryJobId] = useState<string | null>(null);
@@ -101,6 +125,7 @@ export function FormFill() {
     queryKey: ['submission', submissionId],
     queryFn: () => formApi.getById(submissionId!),
     enabled: !!submissionId,
+    refetchOnWindowFocus: false,
   });
 
   const startMutation = useMutation({
@@ -116,16 +141,20 @@ export function FormFill() {
   });
 
   const saveMutation = useMutation({
-    mutationFn: ({ id, tabIndex, data }: { id: string; tabIndex: number; data: Record<string, any> }) =>
+    mutationFn: ({ id, tabIndex, data }: { id: string; tabIndex: number; data: Record<string, any>; screenCode: string }) =>
       formApi.saveTab(id, tabIndex, data),
-    onSuccess: (response) => {
+    onSuccess: (response, variables) => {
       const savedSubmission = response.data.data;
       setSubmission(savedSubmission);
-      // Update local formData with server response to ensure consistency
+      // Only update the screen that was actually saved from server response,
+      // preserving local pre-fill data on other screens (e.g. from pre-booking fetch)
       if (savedSubmission.formData) {
-        setFormData(savedSubmission.formData);
+        const serverData = savedSubmission.formData as Record<string, any>;
+        setFormData((prev: Record<string, Record<string, any>>) => ({
+          ...prev,
+          [variables.screenCode]: serverData[variables.screenCode] ?? prev[variables.screenCode],
+        }));
       }
-      // Don't invalidate queries here to prevent useEffect from resetting currentTab
     },
     onError: (error: any) => {
       const validationErrors = error.response?.data?.data;
@@ -214,8 +243,18 @@ export function FormFill() {
     }
   };
 
-  // Perform booking job
+  // Show booking confirmation before running
+  const handlePerformBookingClick = () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
+      return;
+    }
+    setShowBookingConfirm(true);
+  };
+
+  // Perform booking job (called after confirmation)
   const handlePerformBooking = async () => {
+    setShowBookingConfirm(false);
     if (!fetchedEnquiryNo) {
       toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
       return;
@@ -266,6 +305,132 @@ export function FormFill() {
       const errorMsg = error.response?.data?.error || error.message || 'Failed to start booking job';
       toast({ title: 'Error', description: errorMsg, variant: 'destructive' });
       setBookingLoading(false);
+    }
+  };
+
+  // Pre-fetch booking data via SearchEnquiry (same API as Fetch Details)
+  const handlePreFetchBooking = async () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
+      return;
+    }
+    
+    setPreFetchLoading(true);
+    try {
+      const response = await externalApi.preFetchBooking({ enquiryNo: fetchedEnquiryNo });
+      
+      if (response.data.success) {
+        const data = response.data.data;
+        const newFormData = { ...formData };
+        
+        // Apply mapped fields (e.g. amounts_tax.payment_mode)
+        for (const [key, value] of Object.entries(data)) {
+          if (key.startsWith('_')) continue;
+          const parts = key.split('.');
+          if (parts.length !== 2) continue;
+          const [screenCode, fieldName] = parts;
+          if (screenCode && fieldName && value !== undefined && value !== null) {
+            if (!newFormData[screenCode]) newFormData[screenCode] = {};
+            newFormData[screenCode][fieldName] = value;
+          }
+        }
+        
+        setFormData(newFormData);
+        setPreFetchDone(true);
+        
+        toast({ title: 'Booking data fetched', description: 'Amounts & Tax fields have been pre-filled. Please verify and proceed.' });
+      } else {
+        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to pre-fetch booking data', variant: 'destructive' });
+    } finally {
+      setPreFetchLoading(false);
+    }
+  };
+
+  // Fetch full enquiry details via PopulateEnquiryDetailsById and cache to file
+  const handlePopulateEnquiry = async () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number available', description: 'Please fetch details on Customer & Enquiry screen first', variant: 'destructive' });
+      return;
+    }
+    
+    setPopulateLoading(true);
+    try {
+      const response = await externalApi.populateEnquiry({ enquiryId: fetchedEnquiryNo });
+      
+      if (response.data.success) {
+        setPopulateDone(true);
+        toast({ title: 'Enquiry details fetched & cached', description: `Data saved as ${response.data.cachedAs}` });
+      } else {
+        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch enquiry details', variant: 'destructive' });
+    } finally {
+      setPopulateLoading(false);
+    }
+  };
+
+  // Fetch pre-booking data via SelectedEnquiryByID, cache to file, and apply mapped fields
+  const handleFetchPreBooking = async () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number available', description: 'Please fetch details on Customer & Enquiry screen first', variant: 'destructive' });
+      return;
+    }
+    
+    setPreBookingLoading(true);
+    try {
+      const response = await externalApi.fetchPreBooking({ enquiryId: fetchedEnquiryNo });
+      
+      if (response.data.success) {
+        const mapped = response.data.mappedFields || {};
+        console.log('Pre-booking response data keys:', Object.keys(response.data.data || {}));
+        console.log('Pre-booking mappedFields:', JSON.stringify(mapped, null, 2));
+        
+        // Check if mappedFields is empty — means booking was already performed
+        const dataFields = Object.keys(mapped).filter(k => !k.startsWith('_'));
+        if (dataFields.length === 0) {
+          toast({ title: 'Booking already performed', description: 'No pre-booking data available. This enquiry has already been booked.', variant: 'destructive' });
+          setPreBookingDone(true);
+          return;
+        }
+        
+        const newFormData = { ...formData };
+        
+        // Apply mapped fields to form data (e.g. vehicle_details.customer_id, amounts_tax.base_amount)
+        for (const [key, value] of Object.entries(mapped)) {
+          if (key.startsWith('_')) continue;
+          const parts = key.split('.');
+          if (parts.length !== 2) continue;
+          const [screenCode, fieldName] = parts;
+          if (screenCode && fieldName && value !== undefined && value !== null) {
+            if (!newFormData[screenCode]) newFormData[screenCode] = {};
+            newFormData[screenCode][fieldName] = value;
+          }
+        }
+        
+        console.log('Pre-booking updated formData:', JSON.stringify(newFormData, null, 2));
+        setFormData(newFormData);
+        
+        // Store CGST/SGST metadata for cross-check validation
+        if (mapped['_cgst_perc'] !== undefined) {
+          setCgstMeta({ perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] });
+        }
+        if (mapped['_sgst_perc'] !== undefined) {
+          setSgstMeta({ perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] });
+        }
+        
+        setPreBookingDone(true);
+        toast({ title: 'Pre-booking data fetched & applied', description: 'Fields have been populated. Please verify.' });
+      } else {
+        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch pre-booking data', variant: 'destructive' });
+    } finally {
+      setPreBookingLoading(false);
     }
   };
 
@@ -325,7 +490,6 @@ export function FormFill() {
   };
 
   const applyFetchedData = (data: Record<string, any>, rawData?: any) => {
-    // Parse the fetched data and apply to form
     const newFormData = { ...formData };
     
     console.log('Applying fetched data:', data);
@@ -337,16 +501,50 @@ export function FormFill() {
       setFetchedEnquiryNo(String(enquiryNo));
     }
     
-    for (const [key, value] of Object.entries(data)) {
-      if (key.startsWith('_')) continue; // Skip metadata fields
+    // Track if this enquiry is already booked (check both Booked flag and STATUS_DESC)
+    const bookedFlag = data['_booked'] ?? rawData?.Booked ?? 0;
+    const statusDesc = (data['_status'] || rawData?.STATUS_DESC || '').toLowerCase();
+    setIsBookedEnquiry(bookedFlag === 1 || statusDesc === 'booked');
+    
+    // Handle ENQUIRY_DESCRIPTION -> map to enquiry dropdown, add dynamically if not existing
+    const enquiryDesc = data['customer_enquiry.enquiry'] || data['_enquiry_description'] || rawData?.ENQUIRY_DESCRIPTION || '';
+    if (enquiryDesc) {
+      const normalizedValue = enquiryDesc.toLowerCase().replace(/\s+/g, '_');
       
-      // Key format is "screenCode.fieldName"
+      // Check if this value already exists in static options from the field definition
+      const allScreens = submission?.flow?.flowScreens || [];
+      const custEnqScreen = allScreens.find((fs: any) => fs.screen?.code === 'customer_enquiry');
+      const enquiryField = custEnqScreen?.screen?.fields?.find((f: any) => f.name === 'enquiry');
+      const staticOptions = enquiryField?.options ? parseOptions(enquiryField.options) : [];
+      const existsInStatic = staticOptions.some((o: any) => o.value === normalizedValue || o.label.toLowerCase() === enquiryDesc.toLowerCase());
+      
+      if (!existsInStatic) {
+        setDynamicEnquiryOptions(prev => {
+          const existsInDynamic = prev.some(o => o.value === normalizedValue);
+          if (!existsInDynamic) {
+            return [...prev, { value: normalizedValue, label: enquiryDesc }];
+          }
+          return prev;
+        });
+      }
+      
+      // Use the matching static option value if found, otherwise use normalized
+      const matchingStatic = staticOptions.find((o: any) => o.value === normalizedValue || o.label.toLowerCase() === enquiryDesc.toLowerCase());
+      if (!newFormData['customer_enquiry']) {
+        newFormData['customer_enquiry'] = {};
+      }
+      newFormData['customer_enquiry']['enquiry'] = matchingStatic ? matchingStatic.value : normalizedValue;
+    }
+    
+    for (const [key, value] of Object.entries(data)) {
+      if (key.startsWith('_')) continue;
+      if (key === 'customer_enquiry.enquiry' && enquiryDesc) continue; // Already handled above
+      
       const parts = key.split('.');
       if (parts.length !== 2) continue;
       
       const [screenCode, fieldName] = parts;
       
-      // Apply value even if it's an empty string (but not undefined/null)
       if (screenCode && fieldName && value !== undefined && value !== null) {
         if (!newFormData[screenCode]) {
           newFormData[screenCode] = {};
@@ -360,17 +558,20 @@ export function FormFill() {
     setFormData(newFormData);
   };
 
-  // Initialize form data from submission
+  // Initialize form data from submission — only on initial load to avoid
+  // wiping locally-set pre-booking/pre-fill data on React Query background refetches
   useEffect(() => {
-    if (submissionData?.data?.data) {
+    if (submissionData?.data?.data && isInitialLoad) {
       const sub = submissionData.data.data;
       setSubmission(sub);
       setFormData(sub.formData || {});
-      // Only set currentTab on initial load, not on subsequent saves
-      if (isInitialLoad) {
-        setCurrentTab(sub.currentTabIndex || 0);
-        setIsInitialLoad(false);
+      // Restore fetchedEnquiryNo from saved form data
+      const savedEnquiryNo = sub.formData?.customer_enquiry?.enquiry_no;
+      if (savedEnquiryNo && !fetchedEnquiryNo) {
+        setFetchedEnquiryNo(String(savedEnquiryNo));
       }
+      setCurrentTab(sub.currentTabIndex || 0);
+      setIsInitialLoad(false);
     }
   }, [submissionData, isInitialLoad]);
 
@@ -680,6 +881,16 @@ export function FormFill() {
       }
     }
 
+    // Cross-field validation: either rep_name or executive_name required
+    if (currentScreenCode === 'customer_enquiry') {
+      const repName = getFieldValue('rep_name')?.toString().trim();
+      const execName = getFieldValue('executive_name')?.toString().trim();
+      if (!repName && !execName) {
+        newErrors['rep_name'] = 'Either Sales Rep Name or Executive Name is required';
+        newErrors['executive_name'] = 'Either Sales Rep Name or Executive Name is required';
+      }
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -697,6 +908,7 @@ export function FormFill() {
         id: submission.id,
         tabIndex: currentTab,
         data: formData[currentScreenCode] || {},
+        screenCode: currentScreenCode,
       });
       toast({ title: 'Saved successfully' });
     } catch {
@@ -721,6 +933,7 @@ export function FormFill() {
         id: submission!.id,
         tabIndex: currentTab,
         data: formData[currentScreenCode] || {},
+        screenCode: currentScreenCode,
       });
 
       // Navigate to next tab
@@ -747,6 +960,7 @@ export function FormFill() {
       id: submission.id,
       tabIndex: currentTab,
       data: formData[currentScreenCode] || {},
+      screenCode: currentScreenCode,
     });
 
     submitMutation.mutate(submission.id);
@@ -865,6 +1079,75 @@ export function FormFill() {
   const renderField = (field: ScreenField) => {
     if (!isFieldVisible(field)) return null;
 
+    // Custom: model_id — hidden by default, revealed via eye icon
+    if (field.name === 'model_id' && currentScreenCode === 'vehicle_details') {
+      const modelIdValue = getFieldValue('model_id') || '';
+      if (!modelIdValue) return null;
+      return (
+        <div key={field.name} className="space-y-2 print:space-y-1 col-span-full">
+          <div className="flex items-center gap-2">
+            <Label className="text-xs text-muted-foreground">Model ID</Label>
+            <button
+              type="button"
+              onClick={() => setShowModelId(!showModelId)}
+              className="p-1 rounded hover:bg-secondary transition-colors"
+              title={showModelId ? 'Hide Model ID' : 'Show Model ID'}
+            >
+              {showModelId ? <EyeOff className="h-3.5 w-3.5 text-muted-foreground" /> : <Eye className="h-3.5 w-3.5 text-muted-foreground" />}
+            </button>
+            {showModelId && (
+              <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">{modelIdValue}</span>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Custom: CGST/SGST line — formatted display with cross-check validation
+    if ((field.name === 'cgst_line' || field.name === 'sgst_line') && currentScreenCode === 'amounts_tax') {
+      const lineValue = getFieldValue(field.name) || '';
+      if (!lineValue) return null;
+      
+      const meta = field.name === 'cgst_line' ? cgstMeta : sgstMeta;
+      const label = field.name === 'cgst_line' ? 'CGST' : 'SGST';
+      
+      let calculated: number | null = null;
+      let isMatch = true;
+      if (meta) {
+        calculated = parseFloat(((meta.perc / 100) * meta.applied).toFixed(2));
+        isMatch = Math.abs(calculated - meta.value) < 0.01;
+      }
+
+      return (
+        <div key={field.name} className="space-y-2 print:space-y-1 col-span-full">
+          <Label className="text-sm font-medium">{label}</Label>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 px-3 py-2 bg-muted rounded-md text-sm font-mono">
+              {lineValue}
+            </div>
+            {meta && (
+              <div className={cn(
+                "px-3 py-2 rounded-md text-sm font-mono border min-w-[120px] text-center",
+                isMatch
+                  ? "bg-green-50 border-green-300 text-green-800"
+                  : "bg-red-50 border-red-400 text-red-800 font-bold"
+              )}
+              title={isMatch ? 'Calculation matches' : `Expected ${meta.value}, calculated ${calculated}`}
+              >
+                {calculated}
+                {isMatch ? ' ✓' : ' ✗'}
+              </div>
+            )}
+          </div>
+          {meta && !isMatch && (
+            <p className="text-xs text-red-600">
+              Mismatch: {meta.perc}% of {meta.applied} = {calculated}, but API returned {meta.value}
+            </p>
+          )}
+        </div>
+      );
+    }
+
     const value = getFieldValue(field.name);
     const editable = isFieldEditable(field);
     const error = errors[field.name];
@@ -976,6 +1259,11 @@ export function FormFill() {
             </div>
           );
         } else {
+          // Merge dynamic enquiry options for the 'enquiry' field
+          const mergedOptions = field.name === 'enquiry' && currentScreenCode === 'customer_enquiry'
+            ? [...options, ...dynamicEnquiryOptions.filter(dOpt => !options.some(o => o.value === dOpt.value))]
+            : options;
+          
           input = (
             <Select
               value={value}
@@ -986,7 +1274,7 @@ export function FormFill() {
                 <SelectValue placeholder={field.placeholder || 'Select...'} />
               </SelectTrigger>
               <SelectContent>
-                {options.map((opt) => (
+                {mergedOptions.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
                     {opt.label}
                   </SelectItem>
@@ -1233,26 +1521,126 @@ export function FormFill() {
                         </>
                       )}
                     </Button>
-                    <Button 
-                      variant="default" 
-                      onClick={handlePerformBooking}
-                      disabled={bookingLoading}
-                      className="gap-2 bg-green-600 hover:bg-green-700"
-                    >
-                      {bookingLoading ? (
-                        <>
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          {bookingJobStatus === 'running' ? 'Processing...' : 'Starting...'}
-                        </>
-                      ) : (
-                        <>
-                          <Play className="h-4 w-4" />
-                          Perform Booking
-                        </>
-                      )}
-                    </Button>
                   </>
                 )}
+              </div>
+            )}
+            {/* Fetch buttons - on address_and_details screen */}
+            {currentScreenCode === 'address_and_details' && fetchedEnquiryNo && (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={handlePopulateEnquiry}
+                  disabled={populateLoading}
+                  className={cn(
+                    "gap-2",
+                    populateDone
+                      ? "border-green-300 text-green-700 hover:bg-green-50"
+                      : "border-blue-300 text-blue-700 hover:bg-blue-50"
+                  )}
+                >
+                  {populateLoading ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Fetching...
+                    </>
+                  ) : populateDone ? (
+                    <>
+                      <Check className="h-4 w-4" />
+                      Fetched & Cached
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Fetch Using Enquiry Id
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleFetchPreBooking}
+                  disabled={preBookingLoading}
+                  className={cn(
+                    "gap-2",
+                    preBookingDone
+                      ? "border-green-300 text-green-700 hover:bg-green-50"
+                      : "border-purple-300 text-purple-700 hover:bg-purple-50"
+                  )}
+                >
+                  {preBookingLoading ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Fetching...
+                    </>
+                  ) : preBookingDone ? (
+                    <>
+                      <Check className="h-4 w-4" />
+                      Pre-Booking Cached
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Fetch Pre Booking
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
+            {/* Pre Fetch & Perform Booking - on vehicle_details screen */}
+            {currentScreenCode === 'vehicle_details' && fetchedEnquiryNo && (
+              <div className="flex gap-2">
+                <Button 
+                  variant="outline" 
+                  onClick={handlePreFetchBooking}
+                  disabled={preFetchLoading || isBookedEnquiry}
+                  className="gap-2 border-orange-300 text-orange-700 hover:bg-orange-50"
+                >
+                  {preFetchLoading ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Fetching...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Pre Fetch
+                    </>
+                  )}
+                </Button>
+                <Button 
+                  variant="default" 
+                  onClick={handlePerformBookingClick}
+                  disabled={bookingLoading || isBookedEnquiry || !preFetchDone}
+                  className={cn(
+                    "gap-2",
+                    isBookedEnquiry
+                      ? "bg-gray-400 hover:bg-gray-400 cursor-not-allowed"
+                      : !preFetchDone
+                        ? "bg-gray-300 hover:bg-gray-300 cursor-not-allowed"
+                        : "bg-green-600 hover:bg-green-700"
+                  )}
+                  title={
+                    isBookedEnquiry ? 'Customer has already booked this enquiry' :
+                    !preFetchDone ? 'Please click Pre Fetch first to populate booking data' : ''
+                  }
+                >
+                  {bookingLoading ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      {bookingJobStatus === 'running' ? 'Processing...' : 'Starting...'}
+                    </>
+                  ) : isBookedEnquiry ? (
+                    <>
+                      <Check className="h-4 w-4" />
+                      Already Booked
+                    </>
+                  ) : (
+                    <>
+                      <Play className="h-4 w-4" />
+                      Perform Booking
+                    </>
+                  )}
+                </Button>
               </div>
             )}
           </div>
@@ -1437,6 +1825,34 @@ export function FormFill() {
                 <Search className="h-4 w-4 mr-2" />
               )}
               Search
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Booking Confirmation Dialog */}
+      <Dialog open={showBookingConfirm} onOpenChange={setShowBookingConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Confirm Booking</DialogTitle>
+            <DialogDescription>
+              Are you sure the customer wants to book enquiry #{fetchedEnquiryNo}
+              {formData['customer_enquiry']?.vehicle_model
+                ? ` for model "${formData['customer_enquiry'].vehicle_model}"`
+                : ''}
+              ?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowBookingConfirm(false)}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-green-600 hover:bg-green-700"
+              onClick={handlePerformBooking}
+            >
+              <Play className="h-4 w-4 mr-1" />
+              Yes, Perform Booking
             </Button>
           </DialogFooter>
         </DialogContent>

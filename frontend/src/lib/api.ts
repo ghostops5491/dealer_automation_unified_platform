@@ -324,6 +324,16 @@ export const externalApi = {
     api.post('/external/fetch-enquiry', data),
   fetchEnquiryById: (data: { enquiryId: string; authToken?: string }) =>
     api.post('/external/fetch-enquiry-by-id', data),
+  preFetchBooking: (data: { enquiryNo: string; authToken?: string }) =>
+    api.post('/external/pre-fetch-booking', data),
+  populateEnquiry: (data: { enquiryId: string }) =>
+    api.post('/external/populate-enquiry', data),
+  fetchPreBooking: (data: { enquiryId: string }) =>
+    api.post('/external/fetch-pre-booking', data),
+  getCachedEnquiry: (enquiryId: string) =>
+    api.get(`/external/enquiry-cache/${enquiryId}`),
+  listCachedEnquiries: () =>
+    api.get('/external/enquiry-cache'),
 };
 
 // Vehicle Catalog (Cascading Dropdowns)

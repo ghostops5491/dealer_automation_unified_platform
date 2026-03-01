@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -31,14 +31,15 @@ import { flowApi, formApi, externalApi, jobApi, vehicleCatalogApi } from '@/lib/
 import { parseOptions, cn } from '@/lib/utils';
 import type { FormSubmission, ScreenField, FlowScreen } from '@/types';
 
-// Define which fields are cascading vehicle fields
-const CASCADING_VEHICLE_FIELDS = ['brand', 'model', 'variant', 'color', 'fuel_type'];
+// Fields that appear after "Perform Booking" action — locked behind overlay until booking is done
+const POST_BOOKING_FIELDS = ['registration_type', 'chassis_no', 'engine_no', 'key_no', 'battery_no', 'booking_no', 'customer_id', 'rto_state'];
+
+// Define which fields are cascading vehicle fields (Brand → Model → Variant)
+const CASCADING_VEHICLE_FIELDS = ['brand', 'model', 'variant'];
 const VEHICLE_FIELD_DEPENDENCIES: Record<string, string[]> = {
   brand: [],
   model: ['brand'],
   variant: ['brand', 'model'],
-  color: ['brand', 'model', 'variant'],
-  fuel_type: ['brand', 'model', 'variant', 'color'],
 };
 
 export function FormFill() {
@@ -65,17 +66,14 @@ export function FormFill() {
   
   // Booking Job state
   const [, setBookingJobId] = useState<string | null>(null);
-  const [bookingJobStatus, setBookingJobStatus] = useState<string | null>(null);
-  const [bookingLoading, setBookingLoading] = useState(false);
-  const [isBookedEnquiry, setIsBookedEnquiry] = useState(false);
+  const [, setBookingJobStatus] = useState<string | null>(null);
+  const [, setBookingLoading] = useState(false);
+  const [, setIsBookedEnquiry] = useState(false);
   const [showBookingConfirm, setShowBookingConfirm] = useState(false);
   
   // Dynamic options added from API response (e.g. ENQUIRY_DESCRIPTION)
   const [dynamicEnquiryOptions, setDynamicEnquiryOptions] = useState<{ value: string; label: string }[]>([]);
   
-  // Pre-fetch booking data state
-  const [preFetchLoading, setPreFetchLoading] = useState(false);
-  const [preFetchDone, setPreFetchDone] = useState(false);
   
   // Populate enquiry details state
   const [populateLoading, setPopulateLoading] = useState(false);
@@ -92,6 +90,15 @@ export function FormFill() {
   // Model ID visibility toggle
   const [showModelId, setShowModelId] = useState(false);
   
+  // Model parts fetch state
+  const [modelPartsLoading, setModelPartsLoading] = useState(false);
+
+  // Booking section unlock state (for post-booking fields on vehicle_details screen)
+  const [bookingSectionUnlocked, setBookingSectionUnlocked] = useState(false);
+  const [bookingAmount, setBookingAmount] = useState('');
+  const [performBookingLoading, setPerformBookingLoading] = useState(false);
+  const [, setSaveBookingResponse] = useState<any>(null);
+
   // Enquiry Job state
   const [, setEnquiryJobId] = useState<string | null>(null);
   const [enquiryJobStatus, setEnquiryJobStatus] = useState<string | null>(null);
@@ -102,14 +109,10 @@ export function FormFill() {
     brands: string[];
     models: string[];
     variants: string[];
-    colors: string[];
-    fuelTypes: string[];
   }>({
     brands: [],
     models: [],
     variants: [],
-    colors: [],
-    fuelTypes: [],
   });
   const [catalogLoading, setCatalogLoading] = useState<Record<string, boolean>>({});
 
@@ -243,15 +246,6 @@ export function FormFill() {
     }
   };
 
-  // Show booking confirmation before running
-  const handlePerformBookingClick = () => {
-    if (!fetchedEnquiryNo) {
-      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
-      return;
-    }
-    setShowBookingConfirm(true);
-  };
-
   // Perform booking job (called after confirmation)
   const handlePerformBooking = async () => {
     setShowBookingConfirm(false);
@@ -305,47 +299,6 @@ export function FormFill() {
       const errorMsg = error.response?.data?.error || error.message || 'Failed to start booking job';
       toast({ title: 'Error', description: errorMsg, variant: 'destructive' });
       setBookingLoading(false);
-    }
-  };
-
-  // Pre-fetch booking data via SearchEnquiry (same API as Fetch Details)
-  const handlePreFetchBooking = async () => {
-    if (!fetchedEnquiryNo) {
-      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
-      return;
-    }
-    
-    setPreFetchLoading(true);
-    try {
-      const response = await externalApi.preFetchBooking({ enquiryNo: fetchedEnquiryNo });
-      
-      if (response.data.success) {
-        const data = response.data.data;
-        const newFormData = { ...formData };
-        
-        // Apply mapped fields (e.g. amounts_tax.payment_mode)
-        for (const [key, value] of Object.entries(data)) {
-          if (key.startsWith('_')) continue;
-          const parts = key.split('.');
-          if (parts.length !== 2) continue;
-          const [screenCode, fieldName] = parts;
-          if (screenCode && fieldName && value !== undefined && value !== null) {
-            if (!newFormData[screenCode]) newFormData[screenCode] = {};
-            newFormData[screenCode][fieldName] = value;
-          }
-        }
-        
-        setFormData(newFormData);
-        setPreFetchDone(true);
-        
-        toast({ title: 'Booking data fetched', description: 'Amounts & Tax fields have been pre-filled. Please verify and proceed.' });
-      } else {
-        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
-      }
-    } catch (error: any) {
-      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to pre-fetch booking data', variant: 'destructive' });
-    } finally {
-      setPreFetchLoading(false);
     }
   };
 
@@ -414,6 +367,12 @@ export function FormFill() {
         console.log('Pre-booking updated formData:', JSON.stringify(newFormData, null, 2));
         setFormData(newFormData);
         
+        // Auto-fetch model parts if MODEL_ID is available to populate VehicleCatalog
+        const extractedModelId = newFormData['vehicle_details']?.model_id;
+        if (extractedModelId) {
+          handleFetchModelParts(extractedModelId);
+        }
+        
         // Store CGST/SGST metadata for cross-check validation
         if (mapped['_cgst_perc'] !== undefined) {
           setCgstMeta({ perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] });
@@ -431,6 +390,48 @@ export function FormFill() {
       toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch pre-booking data', variant: 'destructive' });
     } finally {
       setPreBookingLoading(false);
+    }
+  };
+
+  // Fetch model parts from TVS API to populate VehicleCatalog (Brand → Model → Variant)
+  const handleFetchModelParts = async (modelIdOverride?: string) => {
+    const modelIdToUse = modelIdOverride || formData['vehicle_details']?.model_id;
+    if (!modelIdToUse) {
+      toast({ title: 'No Model ID', description: 'Model ID not available. Fetch pre-booking data first.', variant: 'destructive' });
+      return;
+    }
+    setModelPartsLoading(true);
+    try {
+      const response = await externalApi.fetchModelParts({ modelId: modelIdToUse, countryCode: 'IN' });
+      if (response.data.success) {
+        const { inserted, skipped, brands, models } = response.data.data;
+        toast({
+          title: 'Model parts loaded',
+          description: `${inserted} new variants added, ${skipped} already existed. Brands: ${brands?.join(', ')}, Models: ${models?.join(', ')}`,
+        });
+        // Reload the cascading options for brand
+        loadCascadingOptions('brand', formData['vehicle_details'] || {});
+        // If brand is "TVS" (default), auto-set it and load models
+        const vehicleData = formData['vehicle_details'] || {};
+        if (!vehicleData.brand && brands?.includes('TVS')) {
+          setFormData(prev => ({
+            ...prev,
+            vehicle_details: { ...prev['vehicle_details'], brand: 'TVS' },
+          }));
+          setTimeout(() => loadCascadingOptions('model', { brand: 'TVS' }), 300);
+        } else if (vehicleData.brand) {
+          loadCascadingOptions('model', vehicleData);
+          if (vehicleData.model) {
+            loadCascadingOptions('variant', vehicleData);
+          }
+        }
+      } else {
+        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch model parts', variant: 'destructive' });
+    } finally {
+      setModelPartsLoading(false);
     }
   };
 
@@ -588,8 +589,6 @@ export function FormFill() {
     try {
       const brand = vehicleData?.brand || '';
       const model = vehicleData?.model || '';
-      const variant = vehicleData?.variant || '';
-      const color = vehicleData?.color || '';
 
       if (fieldName === 'brand') {
         const response = await vehicleCatalogApi.getBrands();
@@ -600,12 +599,6 @@ export function FormFill() {
       } else if (fieldName === 'variant' && brand && model) {
         const response = await vehicleCatalogApi.getVariants(brand, model);
         setVehicleCatalogOptions(prev => ({ ...prev, variants: response.data.data || [] }));
-      } else if (fieldName === 'color' && brand && model && variant) {
-        const response = await vehicleCatalogApi.getColours(brand, model, variant);
-        setVehicleCatalogOptions(prev => ({ ...prev, colors: response.data.data || [] }));
-      } else if (fieldName === 'fuel_type' && brand && model && variant && color) {
-        const response = await vehicleCatalogApi.getFuelTypes(brand, model, variant, color);
-        setVehicleCatalogOptions(prev => ({ ...prev, fuelTypes: response.data.data || [] }));
       }
     } catch (error) {
       console.error(`Failed to load ${fieldName} options:`, error);
@@ -636,11 +629,17 @@ export function FormFill() {
       if (vehicleData.brand && vehicleData.model) {
         loadCascadingOptions('variant', vehicleData);
       }
-      if (vehicleData.brand && vehicleData.model && vehicleData.variant) {
-        loadCascadingOptions('color', vehicleData);
-      }
-      if (vehicleData.brand && vehicleData.model && vehicleData.variant && vehicleData.color) {
-        loadCascadingOptions('fuel_type', vehicleData);
+    }
+  }, [currentTab, flowScreens.length]);
+
+  // Auto-unlock post-booking section if data already exists (returning to saved form)
+  useEffect(() => {
+    const screenCode = flowScreens[currentTab]?.screen?.code;
+    if (screenCode === 'vehicle_details') {
+      const vehicleData = formData['vehicle_details'] || {};
+      if (vehicleData.booking_amount || vehicleData.booking_no || vehicleData.chassis_no) {
+        setBookingSectionUnlocked(true);
+        if (vehicleData.booking_amount) setBookingAmount(vehicleData.booking_amount);
       }
     }
   }, [currentTab, flowScreens.length]);
@@ -786,11 +785,9 @@ export function FormFill() {
     // Handle cascading resets for vehicle fields
     if (currentScreenCode === 'vehicle_details' && CASCADING_VEHICLE_FIELDS.includes(fieldName)) {
       const dependentFields: Record<string, string[]> = {
-        brand: ['model', 'variant', 'color', 'fuel_type'],
-        model: ['variant', 'color', 'fuel_type'],
-        variant: ['color', 'fuel_type'],
-        color: ['fuel_type'],
-        fuel_type: [],
+        brand: ['model', 'variant'],
+        model: ['variant'],
+        variant: [],
       };
       
       const fieldsToReset = dependentFields[fieldName] || [];
@@ -809,20 +806,12 @@ export function FormFill() {
       
       // Reset dependent options
       if (fieldName === 'brand') {
-        setVehicleCatalogOptions(prev => ({ ...prev, models: [], variants: [], colors: [], fuelTypes: [] }));
+        setVehicleCatalogOptions(prev => ({ ...prev, models: [], variants: [] }));
         if (value) loadCascadingOptions('model', { brand: value });
       } else if (fieldName === 'model') {
-        setVehicleCatalogOptions(prev => ({ ...prev, variants: [], colors: [], fuelTypes: [] }));
+        setVehicleCatalogOptions(prev => ({ ...prev, variants: [] }));
         const vehicleData = formData['vehicle_details'] || {};
         if (value) loadCascadingOptions('variant', { ...vehicleData, model: value });
-      } else if (fieldName === 'variant') {
-        setVehicleCatalogOptions(prev => ({ ...prev, colors: [], fuelTypes: [] }));
-        const vehicleData = formData['vehicle_details'] || {};
-        if (value) loadCascadingOptions('color', { ...vehicleData, variant: value });
-      } else if (fieldName === 'color') {
-        setVehicleCatalogOptions(prev => ({ ...prev, fuelTypes: [] }));
-        const vehicleData = formData['vehicle_details'] || {};
-        if (value) loadCascadingOptions('fuel_type', { ...vehicleData, color: value });
       }
     } else {
       setFormData((prev) => ({
@@ -1213,16 +1202,6 @@ export function FormFill() {
               isLoading = catalogLoading['variant'] || false;
               isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model;
               break;
-            case 'color':
-              cascadingOptions = vehicleCatalogOptions.colors;
-              isLoading = catalogLoading['color'] || false;
-              isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model || !vehicleData.variant;
-              break;
-            case 'fuel_type':
-              cascadingOptions = vehicleCatalogOptions.fuelTypes;
-              isLoading = catalogLoading['fuel_type'] || false;
-              isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model || !vehicleData.variant || !vehicleData.color;
-              break;
           }
           
           // If no catalog options available, fall back to static options
@@ -1556,10 +1535,15 @@ export function FormFill() {
                     </>
                   )}
                 </Button>
+              </div>
+            )}
+            {/* Fetch Pre Booking, Pre Fetch & Perform Booking - on vehicle_details screen */}
+            {currentScreenCode === 'vehicle_details' && fetchedEnquiryNo && (
+              <div className="flex gap-2">
                 <Button
                   variant="outline"
                   onClick={handleFetchPreBooking}
-                  disabled={preBookingLoading}
+                  disabled={preBookingLoading || modelPartsLoading}
                   className={cn(
                     "gap-2",
                     preBookingDone
@@ -1567,77 +1551,20 @@ export function FormFill() {
                       : "border-purple-300 text-purple-700 hover:bg-purple-50"
                   )}
                 >
-                  {preBookingLoading ? (
+                  {preBookingLoading || modelPartsLoading ? (
                     <>
                       <RefreshCw className="h-4 w-4 animate-spin" />
-                      Fetching...
+                      {modelPartsLoading ? 'Loading Model Parts...' : 'Fetching Pre-Booking...'}
                     </>
                   ) : preBookingDone ? (
                     <>
                       <Check className="h-4 w-4" />
-                      Pre-Booking Cached
+                      Form Pre-Filled
                     </>
                   ) : (
                     <>
                       <Download className="h-4 w-4" />
-                      Fetch Pre Booking
-                    </>
-                  )}
-                </Button>
-              </div>
-            )}
-            {/* Pre Fetch & Perform Booking - on vehicle_details screen */}
-            {currentScreenCode === 'vehicle_details' && fetchedEnquiryNo && (
-              <div className="flex gap-2">
-                <Button 
-                  variant="outline" 
-                  onClick={handlePreFetchBooking}
-                  disabled={preFetchLoading || isBookedEnquiry}
-                  className="gap-2 border-orange-300 text-orange-700 hover:bg-orange-50"
-                >
-                  {preFetchLoading ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      Fetching...
-                    </>
-                  ) : (
-                    <>
-                      <Download className="h-4 w-4" />
-                      Pre Fetch
-                    </>
-                  )}
-                </Button>
-                <Button 
-                  variant="default" 
-                  onClick={handlePerformBookingClick}
-                  disabled={bookingLoading || isBookedEnquiry || !preFetchDone}
-                  className={cn(
-                    "gap-2",
-                    isBookedEnquiry
-                      ? "bg-gray-400 hover:bg-gray-400 cursor-not-allowed"
-                      : !preFetchDone
-                        ? "bg-gray-300 hover:bg-gray-300 cursor-not-allowed"
-                        : "bg-green-600 hover:bg-green-700"
-                  )}
-                  title={
-                    isBookedEnquiry ? 'Customer has already booked this enquiry' :
-                    !preFetchDone ? 'Please click Pre Fetch first to populate booking data' : ''
-                  }
-                >
-                  {bookingLoading ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      {bookingJobStatus === 'running' ? 'Processing...' : 'Starting...'}
-                    </>
-                  ) : isBookedEnquiry ? (
-                    <>
-                      <Check className="h-4 w-4" />
-                      Already Booked
-                    </>
-                  ) : (
-                    <>
-                      <Play className="h-4 w-4" />
-                      Perform Booking
+                      Pre Fill Form
                     </>
                   )}
                 </Button>
@@ -1653,9 +1580,152 @@ export function FormFill() {
           )}
         </CardHeader>
         <CardContent className="space-y-4 print:space-y-2">
-          {currentFields
-            .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
-            .map((field: ScreenField) => renderField(field))}
+          {currentScreenCode === 'vehicle_details' ? (
+            <>
+              {/* Pre-booking fields (brand, model, variant, fuel_type, etc.) */}
+              {currentFields
+                .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+                .filter((field: ScreenField) => !POST_BOOKING_FIELDS.includes(field.name))
+                .map((field: ScreenField) => renderField(field))}
+
+              {/* Booking divider with Perform Booking button */}
+              <div className="relative my-6">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-dashed border-gray-300" />
+                </div>
+                <div className="relative flex justify-center">
+                  <span className="bg-white px-4 text-sm font-medium text-gray-500">
+                    Post-Booking Details
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-end gap-3 p-4 rounded-lg border border-blue-200 bg-blue-50/50">
+                <div className="flex-1 max-w-xs">
+                  <Label className="text-sm font-medium mb-1.5 block">Booking Amount</Label>
+                  <Input
+                    type="number"
+                    placeholder="Enter booking amount"
+                    value={bookingAmount}
+                    onChange={(e: any) => setBookingAmount(e.target.value)}
+                    disabled={bookingSectionUnlocked || performBookingLoading}
+                  />
+                </div>
+                <Button
+                  onClick={async () => {
+                    if (!bookingAmount) {
+                      toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
+                      return;
+                    }
+                    setPerformBookingLoading(true);
+                    try {
+                      // Read cached pre-booking JSON to construct SaveBooking body
+                      const preBookingCache = formData['vehicle_details']?.model_id
+                        ? await externalApi.getCachedEnquiry(`pre-booking-${fetchedEnquiryNo}`).catch(() => null)
+                        : null;
+
+                      // For now, pass the pre-booking cached response as bookingData
+                      // The actual SaveBooking request body format may need adjustment
+                      const cachedData = preBookingCache?.data?.data?.response || {};
+                      const bookingData = {
+                        ...cachedData,
+                        BOOKING_AMT: Number(bookingAmount),
+                      };
+
+                      // Step 1: Call SaveBooking
+                      const saveResponse = await externalApi.saveBooking({ bookingData });
+
+                      if (saveResponse.data.success) {
+                        const sbData = saveResponse.data.data;
+                        setSaveBookingResponse(sbData);
+
+                        // Step 2: Submit Voucher using SaveBooking response
+                        try {
+                          const voucherResponse = await externalApi.submitVoucher({
+                            saveBookingResponse: sbData,
+                            bookingAmount: Number(bookingAmount),
+                          });
+
+                          if (voucherResponse.data.success) {
+                            toast({ title: 'Booking & Voucher submitted', description: 'Booking saved and voucher created successfully.' });
+                          } else {
+                            toast({ title: 'Voucher failed', description: voucherResponse.data.error || 'Booking saved but voucher submission failed.', variant: 'destructive' });
+                          }
+                        } catch (vErr: any) {
+                          console.error('Voucher submission error:', vErr);
+                          toast({ title: 'Voucher failed', description: 'Booking saved but voucher submission failed. You can retry later.', variant: 'destructive' });
+                        }
+
+                        // Unlock post-booking fields
+                        setBookingSectionUnlocked(true);
+                        setFormData((prev: Record<string, any>) => ({
+                          ...prev,
+                          vehicle_details: {
+                            ...prev['vehicle_details'],
+                            booking_amount: bookingAmount,
+                            booking_no: sbData.BOOKING_NO || sbData.BookPartDetailsList?.[0]?.BOOK_PART_ID || '',
+                          },
+                        }));
+                      } else {
+                        toast({ title: 'Booking failed', description: saveResponse.data.error || 'Failed to save booking.', variant: 'destructive' });
+                      }
+                    } catch (error: any) {
+                      console.error('Perform booking error:', error);
+                      toast({ title: 'Booking failed', description: error.response?.data?.error || 'Failed to perform booking.', variant: 'destructive' });
+                    } finally {
+                      setPerformBookingLoading(false);
+                    }
+                  }}
+                  disabled={bookingSectionUnlocked || performBookingLoading}
+                  className={cn(
+                    "gap-2",
+                    bookingSectionUnlocked
+                      ? "bg-green-600 hover:bg-green-600 cursor-default"
+                      : "bg-blue-600 hover:bg-blue-700"
+                  )}
+                >
+                  {performBookingLoading ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Processing...
+                    </>
+                  ) : bookingSectionUnlocked ? (
+                    <>
+                      <Unlock className="h-4 w-4" />
+                      Booking Done
+                    </>
+                  ) : (
+                    <>
+                      <Lock className="h-4 w-4" />
+                      Perform Booking
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {/* Post-booking fields — with overlay if not unlocked */}
+              <div className="relative">
+                {!bookingSectionUnlocked && (
+                  <div className="absolute inset-0 z-10 bg-gray-100/70 backdrop-blur-[1px] rounded-lg flex items-center justify-center cursor-not-allowed">
+                    <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm border text-sm text-gray-500">
+                      <Lock className="h-4 w-4" />
+                      Enter booking amount and click &quot;Perform Booking&quot; to unlock
+                    </div>
+                  </div>
+                )}
+                <div className={cn("space-y-4", !bookingSectionUnlocked && "pointer-events-none select-none")}>
+                  {currentFields
+                    .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+                    .filter((field: ScreenField) => POST_BOOKING_FIELDS.includes(field.name))
+                    .map((field: ScreenField) => renderField(field))}
+                </div>
+              </div>
+            </>
+          ) : (
+            currentFields
+              .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+              .map((field: ScreenField) => renderField(field))
+          )}
         </CardContent>
       </Card>
 

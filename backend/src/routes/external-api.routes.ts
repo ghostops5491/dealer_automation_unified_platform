@@ -5,6 +5,9 @@ import {
   preFetchBookingData,
   populateEnquiryById,
   fetchPreBooking,
+  fetchModelParts,
+  saveBooking,
+  submitVoucher,
   getCachedEnquiry,
   listCachedEnquiries,
   checkApiConfig,
@@ -41,6 +44,15 @@ router.post('/populate-enquiry', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_
 
 // Fetch pre-booking data (calls SelectedEnquiryByID with full booking body and caches response)
 router.post('/fetch-pre-booking', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), fetchPreBooking);
+
+// Fetch model parts by MODEL_ID from TVS API and populate VehicleCatalog
+router.post('/fetch-model-parts', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), fetchModelParts);
+
+// Save Booking via TVS API
+router.post('/save-booking', requireRole('MANAGER', 'ASSOCIATE'), saveBooking);
+
+// Submit Voucher (constructs voucher from SaveBooking response + branch config)
+router.post('/submit-voucher', requireRole('MANAGER', 'ASSOCIATE'), submitVoucher);
 
 // Get cached enquiry data
 router.get('/enquiry-cache/:enquiryId', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), getCachedEnquiry);

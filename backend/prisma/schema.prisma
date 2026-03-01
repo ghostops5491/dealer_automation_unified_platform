@@ -348,13 +348,16 @@ model VehicleCatalog {
   brand     String
   model     String
   variant   String
-  colour    String
-  fuelType  String
+  colour    String   @default("")
+  fuelType  String   @default("")
+  partId    String?
+  modelId   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
+  @@unique([branchId, partId])
   @@index([branchId])
   @@index([branchId, brand])
   @@index([branchId, brand, model])

@@ -330,6 +330,12 @@ export const externalApi = {
     api.post('/external/populate-enquiry', data),
   fetchPreBooking: (data: { enquiryId: string }) =>
     api.post('/external/fetch-pre-booking', data),
+  fetchModelParts: (data: { modelId: string; countryCode?: string }) =>
+    api.post('/external/fetch-model-parts', data),
+  saveBooking: (data: { bookingData: any }) =>
+    api.post('/external/save-booking', data),
+  submitVoucher: (data: { saveBookingResponse: any; bookingAmount: number }) =>
+    api.post('/external/submit-voucher', data),
   getCachedEnquiry: (enquiryId: string) =>
     api.get(`/external/enquiry-cache/${enquiryId}`),
   listCachedEnquiries: () =>
@@ -374,4 +380,10 @@ export const vehicleCatalogApi = {
 export const otpConfigApi = {
   getOtp: () => api.get('/otp-config'),
   updateOtp: (otp: string) => api.put('/otp-config', { otp }),
+};
+
+// Branch Config (Manager-editable pre-booking settings)
+export const branchConfigApi = {
+  getPreBookingConfig: () => api.get('/branch-config/pre-booking'),
+  updatePreBookingConfig: (data: Record<string, string>) => api.put('/branch-config/pre-booking', data),
 };

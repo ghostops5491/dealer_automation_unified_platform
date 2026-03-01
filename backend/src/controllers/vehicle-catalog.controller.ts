@@ -89,8 +89,8 @@ export const uploadCatalog = async (
           const colour = row.colour || row.color || row.colour_name || row.color_name || '';
           const fuelType = row.fuel_type || row.fueltype || row.fuel || '';
 
-          if (!brand || !model || !variant || !colour || !fuelType) {
-            errors.push(`Row ${rowNumber}: Missing required fields. Got: Brand="${brand}", Model="${model}", Variant="${variant}", Colour="${colour}", Fuel Type="${fuelType}"`);
+          if (!brand || !model || !variant) {
+            errors.push(`Row ${rowNumber}: Missing required fields. Got: Brand="${brand}", Model="${model}", Variant="${variant}"`);
             return;
           }
 
@@ -98,8 +98,8 @@ export const uploadCatalog = async (
             brand: brand.trim(),
             model: model.trim(),
             variant: variant.trim(),
-            colour: colour.trim(),
-            fuelType: fuelType.trim(),
+            colour: (colour || '').trim(),
+            fuelType: (fuelType || '').trim(),
           });
         })
         .on('end', () => resolve())

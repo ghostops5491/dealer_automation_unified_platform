@@ -12,6 +12,7 @@ import jobRoutes from './job.routes';
 import externalApiRoutes from './external-api.routes';
 import vehicleCatalogRoutes from './vehicle-catalog.routes';
 import otpConfigRoutes from './otp-config.routes';
+import branchConfigRoutes from './branch-config.routes';
 
 const router = Router();
 
@@ -28,6 +29,7 @@ router.use('/jobs', jobRoutes);
 router.use('/external', externalApiRoutes);
 router.use('/vehicle-catalog', vehicleCatalogRoutes);
 router.use('/otp-config', otpConfigRoutes);
+router.use('/branch-config', branchConfigRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

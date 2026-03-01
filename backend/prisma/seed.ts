@@ -60,6 +60,34 @@ async function main() {
 
   console.log('✅ Branch created:', branch.name);
 
+  // Seed default branch configuration (pre-booking + voucher/booking)
+  const branchConfigDefaults = [
+    // Pre-booking config
+    { fieldName: 'INS_COMP_ID', fieldValue: '4' },
+    { fieldName: 'INS_TYPE_ID', fieldValue: '3' },
+    { fieldName: 'REG_TYPE_ID', fieldValue: '1' },
+    { fieldName: 'RTO_ID', fieldValue: '142713' },
+    { fieldName: 'DealerCountry', fieldValue: 'IN' },
+    { fieldName: 'DealerState', fieldValue: 'TG' },
+    // Voucher/Booking config
+    { fieldName: 'COMPANY_ID', fieldValue: '19904' },
+    { fieldName: 'CREATED_BY', fieldValue: '266550' },
+    { fieldName: 'GL_CODE_DEBIT', fieldValue: '11700001' },
+    { fieldName: 'GL_CODE_CREDIT', fieldValue: '11600001' },
+    { fieldName: 'GL_DESC_DEBIT', fieldValue: 'CASH ACCOUNT' },
+    { fieldName: 'GL_DESC_CREDIT', fieldValue: 'VEHICLE CUSTOMER' },
+    { fieldName: 'VCHR_TYPE_ID', fieldValue: '101' },
+    { fieldName: 'PAYMENT_MODE_ID', fieldValue: '1' },
+  ];
+  for (const { fieldName, fieldValue } of branchConfigDefaults) {
+    await prisma.branchField.upsert({
+      where: { branchId_fieldName: { branchId: branch.id, fieldName } },
+      update: {},
+      create: { branchId: branch.id, fieldName, fieldValue },
+    });
+  }
+  console.log('✅ Branch config defaults seeded (pre-booking + voucher)');
+
   // Create sample users
   const managerPassword = await bcrypt.hash('Manager@123', 12);
   const associatePassword = await bcrypt.hash('Associate@123', 12);
@@ -497,18 +525,16 @@ async function main() {
         conditionalValue: 'individual',
         sortOrder: 13,
       },
-      // === GST Fields (shown only for Company) ===
+      // === GST Fields (shown for all ownership types, not mandatory) ===
       {
         screenId: addressScreen.id,
         name: 'gst_number',
         label: 'GST Number',
         fieldType: 'TEXT',
         placeholder: 'Enter GST number (e.g., 22AAAAA0000A1Z5)',
-        isRequired: true,
+        isRequired: false,
         validationRegex: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$',
         validationMessage: 'Please enter a valid GST number',
-        conditionalField: 'customer_enquiry.ownership_type',
-        conditionalValue: 'company',
         sortOrder: 14,
       },
       {
@@ -516,9 +542,7 @@ async function main() {
         name: 'gst_certificate_file',
         label: 'GST Certificate',
         fieldType: 'FILE',
-        isRequired: true,
-        conditionalField: 'customer_enquiry.ownership_type',
-        conditionalValue: 'company',
+        isRequired: false,
         sortOrder: 15,
       },
       // === Address Proof (shown for all) ===
@@ -570,7 +594,7 @@ async function main() {
 
   await prisma.screenField.createMany({
     data: [
-      // Cascading vehicle fields (Brand → Model → Variant → Colour → Fuel Type)
+      // Cascading vehicle fields (Brand → Model → Variant)
       // Options are loaded from VehicleCatalog - these are fallbacks if no catalog is uploaded
       {
         screenId: vehicleScreen.id,
@@ -580,6 +604,7 @@ async function main() {
         isRequired: true,
         placeholder: 'Select brand (from vehicle catalog)',
         options: JSON.stringify([
+          { value: 'TVS', label: 'TVS' },
           { value: 'Tata', label: 'Tata' },
           { value: 'Mahindra', label: 'Mahindra' },
           { value: 'Maruti Suzuki', label: 'Maruti Suzuki' },
@@ -615,21 +640,11 @@ async function main() {
       },
       {
         screenId: vehicleScreen.id,
-        name: 'color',
-        label: 'Colour',
-        fieldType: 'SELECT',
-        isRequired: true,
-        placeholder: 'Select colour (depends on variant)',
-        options: JSON.stringify([]),
-        sortOrder: 4,
-      },
-      {
-        screenId: vehicleScreen.id,
         name: 'fuel_type',
         label: 'Fuel Type',
         fieldType: 'SELECT',
-        isRequired: true,
-        placeholder: 'Select fuel type (depends on colour)',
+        isRequired: false,
+        placeholder: 'Select fuel type',
         options: JSON.stringify([
           { value: 'Petrol', label: 'Petrol' },
           { value: 'Diesel', label: 'Diesel' },
@@ -638,7 +653,7 @@ async function main() {
           { value: 'Hybrid', label: 'Hybrid' },
           { value: 'Electric', label: 'Electric' },
         ]),
-        sortOrder: 5,
+        sortOrder: 4,
       },
       // Other vehicle fields
       {
@@ -737,7 +752,7 @@ async function main() {
     ],
   });
 
-  console.log('✅ Screen 3 created: Vehicle Details (15 fields)');
+  console.log('✅ Screen 3 created: Vehicle Details (14 fields, no colour)');
 
   // ============================================
   // SCREEN 4: Amounts & Tax

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key, Trash2, Loader2 } from 'lucide-react';
+import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key, Trash2, Loader2, Settings, Save } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,7 +17,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useAuthStore } from '@/store/auth';
-import { flowApi, formApi, otpConfigApi } from '@/lib/api';
+import { flowApi, formApi, otpConfigApi, branchConfigApi } from '@/lib/api';
 import { formatDateTime, getStatusColor } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import type { Flow, FormSubmission } from '@/types';
@@ -30,6 +30,8 @@ export function UserDashboard() {
   const [otpValue, setOtpValue] = useState('');
   const [isUpdatingOtp, setIsUpdatingOtp] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<FormSubmission | null>(null);
+  const [pbConfig, setPbConfig] = useState<Record<string, string>>({});
+  const [pbConfigSaving, setPbConfigSaving] = useState(false);
 
   // OTP mutation
   const updateOtpMutation = useMutation({
@@ -106,6 +108,18 @@ export function UserDashboard() {
   const { data: statsData } = useQuery({
     queryKey: ['branch-stats'],
     queryFn: () => formApi.getStats(),
+  });
+
+  // Pre-booking config (Manager only)
+  useQuery({
+    queryKey: ['pre-booking-config'],
+    queryFn: async () => {
+      const res = await branchConfigApi.getPreBookingConfig();
+      setPbConfig(res.data.data || {});
+      return res;
+    },
+    enabled: user?.role === 'MANAGER',
+    refetchOnWindowFocus: false,
   });
 
   const flows = flowsData?.data?.data || [];
@@ -253,6 +267,90 @@ export function UserDashboard() {
             <Button onClick={() => navigate('/dashboard/insurance-approvals')} variant="outline">
               Review Now
             </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Pre-Booking Configuration - Manager Only */}
+      {user?.role === 'MANAGER' && (
+        <Card className="border-slate-200">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Settings className="h-5 w-5 text-slate-600" />
+                <CardTitle className="text-base">Pre-Booking Configuration</CardTitle>
+              </div>
+              <Button
+                size="sm"
+                className="h-8 gap-1"
+                disabled={pbConfigSaving}
+                onClick={async () => {
+                  setPbConfigSaving(true);
+                  try {
+                    await branchConfigApi.updatePreBookingConfig(pbConfig);
+                    toast({ title: 'Configuration saved' });
+                  } catch (err: any) {
+                    toast({ title: 'Error', description: err.response?.data?.error || 'Failed to save', variant: 'destructive' });
+                  } finally {
+                    setPbConfigSaving(false);
+                  }
+                }}
+              >
+                {pbConfigSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                Save
+              </Button>
+            </div>
+            <CardDescription>Configure values used for pre-booking, booking, and voucher APIs</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">Pre-Booking</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {[
+                  { key: 'INS_COMP_ID', label: 'Insurance Company ID' },
+                  { key: 'INS_TYPE_ID', label: 'Insurance Type ID' },
+                  { key: 'REG_TYPE_ID', label: 'Registration Type ID' },
+                  { key: 'RTO_ID', label: 'RTO ID' },
+                  { key: 'DealerCountry', label: 'Dealer Country' },
+                  { key: 'DealerState', label: 'Dealer State' },
+                ].map(({ key, label }) => (
+                  <div key={key} className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">{label}</label>
+                    <Input
+                      value={pbConfig[key] || ''}
+                      onChange={(e: any) => setPbConfig((prev: Record<string, string>) => ({ ...prev, [key]: e.target.value }))}
+                      className="h-8 text-sm"
+                      placeholder={key}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">Voucher / Booking</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {[
+                  { key: 'COMPANY_ID', label: 'Company ID' },
+                  { key: 'CREATED_BY', label: 'Created By (User ID)' },
+                  { key: 'GL_CODE_DEBIT', label: 'GL Code (Debit)' },
+                  { key: 'GL_CODE_CREDIT', label: 'GL Code (Credit)' },
+                  { key: 'GL_DESC_DEBIT', label: 'GL Desc (Debit)' },
+                  { key: 'GL_DESC_CREDIT', label: 'GL Desc (Credit)' },
+                  { key: 'VCHR_TYPE_ID', label: 'Voucher Type ID' },
+                  { key: 'PAYMENT_MODE_ID', label: 'Payment Mode ID' },
+                ].map(({ key, label }) => (
+                  <div key={key} className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">{label}</label>
+                    <Input
+                      value={pbConfig[key] || ''}
+                      onChange={(e: any) => setPbConfig((prev: Record<string, string>) => ({ ...prev, [key]: e.target.value }))}
+                      className="h-8 text-sm"
+                      placeholder={key}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}

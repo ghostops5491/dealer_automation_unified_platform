@@ -261,9 +261,9 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
           user.externalUserId
         );
       } catch (tokenError: any) {
-        return res.status(401).json({
+        return res.status(502).json({
           success: false,
-          error: `Token generation failed: ${tokenError.message}`,
+          error: `TVS token generation failed: ${tokenError.message}`,
           hint: 'You can also manually provide an auth token'
         });
       }
@@ -320,9 +320,27 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
     const enquiryList = response.data.data?.EnquiryList || [];
 
     if (enquiryList.length === 0) {
+      const errorMessage = mobileNumber
+        ? 'Mobile number not found. Please try searching with Enquiry ID instead.'
+        : 'No enquiry found with the provided Enquiry ID.';
       return res.status(404).json({
         success: false,
-        error: 'No enquiry found with the provided details'
+        error: errorMessage
+      });
+    }
+
+    // Check if ALL results are already booked
+    const allBooked = enquiryList.every((e: TVSEnquiry) => (e.Booked ?? 0) === 1);
+    if (allBooked && enquiryList.length === 1) {
+      const enquiry = enquiryList[0];
+      return res.status(409).json({
+        success: false,
+        error: mobileNumber
+          ? `Mobile number found but order is already booked (Enquiry #${enquiry.ENQUIRY_NO} - ${enquiry.CUST_NAME}).`
+          : `Enquiry #${enquiry.ENQUIRY_NO} is already booked (${enquiry.CUST_NAME}).`,
+        alreadyBooked: true,
+        enquiryNo: enquiry.ENQUIRY_NO,
+        customerName: enquiry.CUST_NAME,
       });
     }
 
@@ -354,7 +372,7 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
       success: true,
       multiple: false,
       data: mappedData,
-      rawData: enquiry // Include raw data for reference
+      rawData: enquiry
     });
 
   } catch (error: any) {
@@ -368,13 +386,12 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
         });
       }
       if (error.response?.status === 401) {
-        // Clear cached token on auth error
-        return res.status(401).json({
+        return res.status(502).json({
           success: false,
-          error: 'Invalid or expired authorization token. Token will be regenerated on next request.'
+          error: 'TVS API: Invalid or expired authorization token. Token will be regenerated on next request.'
         });
       }
-      return res.status(error.response?.status || 500).json({
+      return res.status(error.response?.status === 401 ? 502 : (error.response?.status || 500)).json({
         success: false,
         error: error.response?.data?.message || error.message
       });
@@ -436,9 +453,9 @@ export const fetchEnquiryById = async (req: AuthRequest, res: Response) => {
           user.externalUserId!
         );
       } catch (tokenError: any) {
-        return res.status(401).json({
+        return res.status(502).json({
           success: false,
-          error: `Token generation failed: ${tokenError.message}`
+          error: `TVS token generation failed: ${tokenError.message}`
         });
       }
     }
@@ -622,9 +639,9 @@ export const preFetchBookingData = async (req: AuthRequest, res: Response) => {
     console.error('Error pre-fetching booking data:', error);
     if (axios.isAxiosError(error)) {
       if (error.response?.status === 401) {
-        return res.status(401).json({ success: false, error: 'Invalid or expired token. Will regenerate on next request.' });
+        return res.status(502).json({ success: false, error: 'TVS API: Invalid or expired token. Will regenerate on next request.' });
       }
-      return res.status(error.response?.status || 500).json({
+      return res.status(error.response?.status === 401 ? 502 : (error.response?.status || 500)).json({
         success: false,
         error: error.response?.data?.message || error.message,
       });
@@ -916,9 +933,9 @@ export const populateEnquiryById = async (req: AuthRequest, res: Response) => {
     console.error('Error in populateEnquiryById:', error);
     if (axios.isAxiosError(error)) {
       if (error.response?.status === 401) {
-        return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+        return res.status(502).json({ success: false, error: 'TVS API: Invalid or expired token' });
       }
-      return res.status(error.response?.status || 500).json({
+      return res.status(error.response?.status === 401 ? 502 : (error.response?.status || 500)).json({
         success: false,
         error: error.response?.data?.message || error.message,
       });
@@ -1194,9 +1211,9 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
     console.error('Error in fetchPreBooking:', error);
     if (axios.isAxiosError(error)) {
       if (error.response?.status === 401) {
-        return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+        return res.status(502).json({ success: false, error: 'TVS API: Invalid or expired token' });
       }
-      return res.status(error.response?.status || 500).json({
+      return res.status(error.response?.status === 401 ? 502 : (error.response?.status || 500)).json({
         success: false,
         error: error.response?.data?.message || error.message,
       });

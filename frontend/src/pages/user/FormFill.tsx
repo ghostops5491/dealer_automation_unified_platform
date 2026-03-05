@@ -99,11 +99,6 @@ export function FormFill() {
   const [performBookingLoading, setPerformBookingLoading] = useState(false);
   const [, setSaveBookingResponse] = useState<any>(null);
 
-  // Enquiry Job state
-  const [, setEnquiryJobId] = useState<string | null>(null);
-  const [enquiryJobStatus, setEnquiryJobStatus] = useState<string | null>(null);
-  const [enquiryLoading, setEnquiryLoading] = useState(false);
-
   // Cascading vehicle dropdown state
   const [vehicleCatalogOptions, setVehicleCatalogOptions] = useState<{
     brands: string[];
@@ -432,61 +427,6 @@ export function FormFill() {
       toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch model parts', variant: 'destructive' });
     } finally {
       setModelPartsLoading(false);
-    }
-  };
-
-  // Run enquiry search job
-  const handleRunEnquiry = async () => {
-    if (!fetchedEnquiryNo) {
-      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
-      return;
-    }
-    
-    setEnquiryLoading(true);
-    setEnquiryJobStatus(null);
-    
-    try {
-      const response = await jobApi.runEnquiry(fetchedEnquiryNo);
-      
-      if (response.data.success) {
-        const jobId = response.data.jobId;
-        setEnquiryJobId(jobId);
-        setEnquiryJobStatus('running');
-        toast({ title: 'Enquiry search job started', description: `Job ID: ${jobId}` });
-        
-        // Poll for job status
-        const pollInterval = setInterval(async () => {
-          try {
-            const statusResponse = await jobApi.getJobStatus(jobId);
-            const status = statusResponse.data.status;
-            setEnquiryJobStatus(status);
-            
-            if (status === 'completed') {
-              clearInterval(pollInterval);
-              setEnquiryLoading(false);
-              toast({ title: 'Enquiry search completed successfully', variant: 'default' });
-            } else if (status === 'failed') {
-              clearInterval(pollInterval);
-              setEnquiryLoading(false);
-              toast({ title: 'Enquiry search job failed', description: 'Check Jobs menu for details', variant: 'destructive' });
-            }
-          } catch (error) {
-            // Job runner might be down, stop polling
-            clearInterval(pollInterval);
-            setEnquiryLoading(false);
-          }
-        }, 2000);
-        
-        // Clear polling after 5 minutes max
-        setTimeout(() => clearInterval(pollInterval), 300000);
-      } else {
-        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
-        setEnquiryLoading(false);
-      }
-    } catch (error: any) {
-      const errorMsg = error.response?.data?.error || error.message || 'Failed to start enquiry job';
-      toast({ title: 'Error', description: errorMsg, variant: 'destructive' });
-      setEnquiryLoading(false);
     }
   };
 
@@ -1481,24 +1421,6 @@ export function FormFill() {
                     >
                       <ExternalLink className="h-4 w-4" />
                       View Enquiry
-                    </Button>
-                    <Button 
-                      variant="default" 
-                      onClick={handleRunEnquiry}
-                      disabled={enquiryLoading}
-                      className="gap-2 bg-purple-600 hover:bg-purple-700"
-                    >
-                      {enquiryLoading ? (
-                        <>
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          {enquiryJobStatus === 'running' ? 'Processing...' : 'Starting...'}
-                        </>
-                      ) : (
-                        <>
-                          <Search className="h-4 w-4" />
-                          Run Enquiry
-                        </>
-                      )}
                     </Button>
                   </>
                 )}

@@ -21,9 +21,8 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Don't redirect on 401 for login endpoints - let the login page handle the error
-    const isLoginEndpoint = error.config?.url?.includes('/auth/') && 
-                            error.config?.url?.includes('/login');
+    const url = error.config?.url || '';
+    const isLoginEndpoint = url.includes('/auth/') && url.includes('/login');
     
     if (error.response?.status === 401 && !isLoginEndpoint) {
       useAuthStore.getState().logout();

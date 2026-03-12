@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { AuthRequest, ApiResponse } from '../types';
 import { prisma } from '../lib/prisma';
 
-// Pre-Booking config keys (used by SelectedEnquiryByID)
+// Pre-Booking config keys (used by SelectedEnquiryByID + SetBookingLineItem)
 const PRE_BOOKING_CONFIG_KEYS = [
   'INS_COMP_ID',
   'INS_TYPE_ID',
@@ -10,6 +10,7 @@ const PRE_BOOKING_CONFIG_KEYS = [
   'RTO_ID',
   'DealerCountry',
   'DealerState',
+  'SALE_MODE',
 ];
 
 const PRE_BOOKING_DEFAULTS: Record<string, string> = {
@@ -19,6 +20,7 @@ const PRE_BOOKING_DEFAULTS: Record<string, string> = {
   RTO_ID: '142713',
   DealerCountry: 'IN',
   DealerState: 'TG',
+  SALE_MODE: '4',
 };
 
 // Voucher/Booking config keys (used by SaveBooking + Voucher submission)

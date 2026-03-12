@@ -1292,13 +1292,20 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
 
     console.log(`GetModelPart returned ${parts.length} parts`);
 
-    // Parse each part's DESCRIPTION to extract Brand, Model, Variant
+    // Parse each part's DESCRIPTION to extract Brand, Model, Variant + TVS metadata
     const catalogEntries: Array<{
       brand: string;
       model: string;
       variant: string;
       partId: string;
       modelId: string;
+      hsnCode: string;
+      hsnId: number;
+      itemTypeId: number;
+      itemTaxCatId: number;
+      series: string;
+      isEvModel: boolean;
+      exShrmPrice: number;
     }> = [];
 
     for (const part of parts) {
@@ -1308,11 +1315,8 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
 
       if (!description || !partIdVal) continue;
 
-      // Parse: "TVS JUPITER-OBDIIB DISC NEP(CBU) GLC.COP"
-      // Brand = first word ("TVS"), Model = second word before space/hyphen ("JUPITER")
       const words = description.split(/[\s]+/);
       const brand = words[0] || 'TVS';
-      // Second token: split on hyphen to get the model name
       const secondToken = words[1] || '';
       const modelName = secondToken.split('-')[0] || secondToken;
 
@@ -1322,6 +1326,13 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
         variant: description,
         partId: String(partIdVal),
         modelId: String(modelIdVal),
+        hsnCode: part.HSN_CODE || part.HsnCode || '',
+        hsnId: part.HSN_ID || part.HsnId || 0,
+        itemTypeId: part.ITEM_TYPE_ID || part.ItemTypeId || 1,
+        itemTaxCatId: part.ITEM_TAX_CAT_ID || part.ItemTaxCatId || 4,
+        series: part.SERIES || part.Series || modelName,
+        isEvModel: part.IS_EV_MODEL || part.IsEvModel || false,
+        exShrmPrice: part.CUR_MARKET_PRICE || part.MOV_AVG_PRICE || 0,
       });
     }
 
@@ -1329,9 +1340,9 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, error: 'Could not parse any model parts from the response' });
     }
 
-    // Upsert into VehicleCatalog — no duplicates by branchId + partId
+    // Upsert into VehicleCatalog — update existing entries with new fields, insert new ones
     let inserted = 0;
-    let skipped = 0;
+    let updated = 0;
 
     for (const entry of catalogEntries) {
       const existing = await prisma.vehicleCatalog.findFirst({
@@ -1339,7 +1350,19 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
       });
 
       if (existing) {
-        skipped++;
+        await prisma.vehicleCatalog.update({
+          where: { id: existing.id },
+          data: {
+            hsnCode: entry.hsnCode || existing.hsnCode,
+            hsnId: entry.hsnId || existing.hsnId,
+            itemTypeId: entry.itemTypeId || existing.itemTypeId,
+            itemTaxCatId: entry.itemTaxCatId || existing.itemTaxCatId,
+            series: entry.series || existing.series,
+            isEvModel: entry.isEvModel,
+            exShrmPrice: entry.exShrmPrice || existing.exShrmPrice,
+          },
+        });
+        updated++;
         continue;
       }
 
@@ -1351,6 +1374,13 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
           variant: entry.variant,
           partId: entry.partId,
           modelId: entry.modelId,
+          hsnCode: entry.hsnCode,
+          hsnId: entry.hsnId,
+          itemTypeId: entry.itemTypeId,
+          itemTaxCatId: entry.itemTaxCatId,
+          series: entry.series,
+          isEvModel: entry.isEvModel,
+          exShrmPrice: entry.exShrmPrice,
           colour: '',
           fuelType: '',
         },
@@ -1358,7 +1388,7 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
       inserted++;
     }
 
-    console.log(`VehicleCatalog: inserted ${inserted}, skipped ${skipped} (already exist)`);
+    console.log(`VehicleCatalog: inserted ${inserted}, updated ${updated} (with new fields)`);
 
     // Cache the raw response
     ensureEnquiryCacheDir();
@@ -1377,7 +1407,7 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
       data: {
         totalParts: parts.length,
         inserted,
-        skipped,
+        updated,
         brands: [...new Set(catalogEntries.map(e => e.brand))],
         models: [...new Set(catalogEntries.map(e => e.model))],
       },
@@ -1396,11 +1426,11 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// ==================== SAVE BOOKING ====================
-// Calls TVS SaveBooking API and returns the response (which includes SL_CODE, BOOKING_AMT, etc.)
-export const saveBooking = async (req: AuthRequest, res: Response) => {
+// ==================== SET BOOKING LINE ITEM ====================
+// Calls TVS SetBookingLineItem API to set model/part details on the booking
+export const setBookingLineItem = async (req: AuthRequest, res: Response) => {
   try {
-    const { bookingData } = req.body;
+    const { enquiryId, partId, brand, model, variant } = req.body;
     const userId = req.user?.id;
     const branchId = req.user?.branchId;
 
@@ -1408,8 +1438,324 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ success: false, error: 'User not authenticated' });
     }
 
-    if (!bookingData) {
-      return res.status(400).json({ success: false, error: 'bookingData is required' });
+    if (!enquiryId) {
+      return res.status(400).json({ success: false, error: 'enquiryId is required' });
+    }
+
+    if (!partId && !variant) {
+      return res.status(400).json({ success: false, error: 'Either partId or variant (with brand + model) is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+
+    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+    const branch = user.branch;
+
+    if (!branch.dealerId || !branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    // Generate token
+    let token: string | undefined;
+    if (user.externalLoginId && user.externalRoleId) {
+      try {
+        token = await generateTVSToken(
+          branch.dealerId,
+          branch.externalBranchId,
+          user.externalRoleId,
+          user.externalLoginId,
+          user.externalUserId || 0
+        );
+      } catch (e: any) {
+        return res.status(502).json({ success: false, error: `TVS token generation failed: ${e.message}` });
+      }
+    }
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'No auth token available' });
+    }
+
+    // Load branch config
+    const pbConfig = await getBranchConfig(branchId);
+
+    // Resolve VehicleCatalog entry — by partId or by brand+model+variant name
+    let catalogEntry;
+    if (partId) {
+      catalogEntry = await prisma.vehicleCatalog.findFirst({
+        where: { branchId, partId: String(partId) },
+      });
+    } else {
+      catalogEntry = await prisma.vehicleCatalog.findFirst({
+        where: { branchId, brand, model, variant },
+      });
+    }
+
+    if (!catalogEntry) {
+      return res.status(404).json({ success: false, error: 'Selected vehicle variant not found in catalog. Please re-fetch model parts.' });
+    }
+
+    // Load pre-booking cached data for amounts and IDs
+    ensureEnquiryCacheDir();
+    const preBookingCachePath = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+    let preBookingData: any = null;
+
+    if (fs.existsSync(preBookingCachePath)) {
+      try {
+        const raw = fs.readFileSync(preBookingCachePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        preBookingData = parsed.response?.data || parsed.response || parsed;
+      } catch (e) {
+        console.error('Failed to read pre-booking cache:', e);
+      }
+    }
+
+    if (!preBookingData) {
+      return res.status(400).json({ success: false, error: 'Pre-booking data not found. Please fetch pre-booking first.' });
+    }
+
+    const booking = preBookingData.BookingPartDetails?.[0] || preBookingData;
+    const customerId = booking.CUSTOMER_ID || preBookingData.CUSTOMER_ID || 0;
+    const runningNo = booking.BOOK_PART_ID || booking.RunningNo || 0;
+    const unitPrice = booking.UNIT_PRICE || booking.EX_SHRM_PRICE || catalogEntry.exShrmPrice || 0;
+    const exShrmPrice = booking.EX_SHRM_PRICE || unitPrice;
+
+    // Tax calculation from pre-booking data
+    const taxDetails: any[] = booking.BookingPartTaxList || booking.TaxDetails || preBookingData.TaxDetails || [];
+    const cgstEntry = taxDetails.find((t: any) => t.DESCRIPTION === 'CGST' || t.TAX_TYPE_ID === 12);
+    const sgstEntry = taxDetails.find((t: any) => t.DESCRIPTION === 'SGST' || t.TAX_TYPE_ID === 11);
+
+    const cgstPerc = cgstEntry?.TAX_PERC || 9;
+    const sgstPerc = sgstEntry?.TAX_PERC || 9;
+    const totalTaxPerc = cgstPerc + sgstPerc;
+    const taxAmount = Math.round((unitPrice * totalTaxPerc / 100) * 100) / 100;
+    const cgstValue = Math.round((unitPrice * cgstPerc / 100) * 100) / 100;
+    const sgstValue = Math.round((unitPrice * sgstPerc / 100) * 100) / 100;
+    const totalAmount = Math.round((unitPrice + taxAmount) * 100) / 100;
+
+    // Load all model parts from cache for the modelPartList
+    const modelPartsCachePath = path.join(ENQUIRY_CACHE_DIR, `model-parts-${catalogEntry.modelId}.json`);
+    let allModelParts: any[] = [];
+
+    if (fs.existsSync(modelPartsCachePath)) {
+      try {
+        const raw = fs.readFileSync(modelPartsCachePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        allModelParts = parsed.response?.data || parsed.response || [];
+      } catch (e) {
+        console.error('Failed to read model parts cache:', e);
+      }
+    }
+
+    // Build ModelPart object for the selected part
+    const selectedRawPart = allModelParts.find((p: any) => (p.PART_ID || p.PartId) === partId) || {};
+    const buildModelPartObj = (rawPart: any, fallbackCatalog: any) => ({
+      IS_EV_MODEL: rawPart.IS_EV_MODEL || fallbackCatalog.isEvModel || false,
+      STATE_ID: rawPart.STATE_ID || null,
+      DEALER_COUNTRY_CODE_FOR_ANGULAR: branch.countryCode || 'IN',
+      DEALER_ID_FOR_ANGULAR: 0,
+      BRANCH_ID_FOR_ANGULAR: 0,
+      PART_ID: rawPart.PART_ID || fallbackCatalog.partId || '',
+      MODEL_ID: rawPart.MODEL_ID || fallbackCatalog.modelId || '',
+      ITEM_TYPE_ID: rawPart.ITEM_TYPE_ID || fallbackCatalog.itemTypeId || 1,
+      ITEM_TAX_CAT_ID: rawPart.ITEM_TAX_CAT_ID || fallbackCatalog.itemTaxCatId || 4,
+      DESCRIPTION: rawPart.DESCRIPTION || fallbackCatalog.variant || null,
+      DEMAND_VEHICLE: rawPart.DEMAND_VEHICLE || false,
+      MOV_AVG_PRICE: rawPart.MOV_AVG_PRICE || 0,
+      CUR_MARKET_PRICE: rawPart.CUR_MARKET_PRICE || 0,
+      SERIES: rawPart.SERIES || fallbackCatalog.series || null,
+      HSN_CODE: rawPart.HSN_CODE || fallbackCatalog.hsnCode || '',
+      APP_FOR_SALE: rawPart.APP_FOR_SALE || false,
+      Modified_ON: '0001-01-01T00:00:00',
+      ACTIVE: false,
+      IS_OLD_VEHICLE: false,
+      CATEGORY_ID: null,
+      PART_DESC: null,
+      COUNTRY_CODE: null,
+      DEALER_ID: 0,
+      SALES_SL_CODE: 0,
+      PURCHASE_SL_CODE: 0,
+      HSN_ID: rawPart.HSN_ID || fallbackCatalog.hsnId || 0,
+      IS_EV_VEH: rawPart.IS_EV_VEH || false,
+      IS_SELECTED: false,
+    });
+
+    // Build the modelPartList from all cached parts
+    const modelPartList = allModelParts.length > 0
+      ? allModelParts.map((p: any) => buildModelPartObj(p, catalogEntry))
+      : [buildModelPartObj(selectedRawPart, catalogEntry)];
+
+    // Build the request body
+    const requestBody = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      ENQUIRY_ID: Number(enquiryId),
+      AMD_CODE: 0,
+      LocationID: 0,
+      IS_EMAP: null,
+      DealerCountry: pbConfig.DealerCountry || branch.countryCode || 'IN',
+      DealerState: pbConfig.DealerState || 'TG',
+      REG_TYPE_ID: pbConfig.REG_TYPE_ID,
+      INS_COMP_ID: pbConfig.INS_COMP_ID,
+      INS_TYPE_ID: pbConfig.INS_TYPE_ID,
+      RTO_ID: pbConfig.RTO_ID,
+      RunningNo: runningNo,
+      SALE_MODE: pbConfig.SALE_MODE || 4,
+      CUSTOMER_ID: customerId,
+      IsModPartChanged: true,
+      ModelId: catalogEntry.modelId || '',
+      PartId: catalogEntry.partId || '',
+      BookingPartList: [
+        {
+          SelectedSchemes: null,
+          ActualDiscount: null,
+          DiscountID: 0,
+          schemeDiscount: null,
+          RunningNo: 0,
+          DEALER_ID: branch.dealerId,
+          BRANCH_ID: branch.externalBranchId,
+          BOOK_PART_ID: runningNo,
+          PART_ID: catalogEntry.partId || '',
+          DESCRIPTION: null,
+          MODEL_ID: catalogEntry.modelId || '',
+          UNIT_PRICE: unitPrice,
+          STOCK_AVAILABLE: 0,
+          STOCK_IN_TRANSIT: 0,
+          BOOKED_QTY: 1,
+          RESV_QTY: 0,
+          ALLOTED_QTY: 0,
+          PENDING_QTY: 1,
+          EX_SHRM_PRICE: exShrmPrice,
+          SCHEME_DISC: 0,
+          DISC_VALUE: 0,
+          MASTER_DISC: 0,
+          MANUAL_DISC: 0,
+          TAX: totalTaxPerc,
+          CGST: cgstPerc,
+          SGST: sgstPerc,
+          IGST: null,
+          UTGST: null,
+          CESS: null,
+          HSN_CODE: catalogEntry.hsnCode || '',
+          HSN_ID: catalogEntry.hsnId || 0,
+          TAX_AMOUNT: taxAmount,
+          ACC_CHARGES: 0,
+          REG_CHARGES: 0,
+          INS_CHARGES: 0,
+          OTH_CHARGES: 0,
+          ACCESS_LOCATION_ID: null,
+          TOTAL_AMOUNT: totalAmount,
+          ModelPart: buildModelPartObj(selectedRawPart, catalogEntry),
+          ROW_STATE: 0,
+          VEHICLE_ID: 0,
+          STATUS: 0,
+          ALLOT_VEH_ID: null,
+          PART_DESC: null,
+          BookingPartTaxList: [
+            {
+              DEALER_ID: branch.dealerId,
+              BRANCH_ID: branch.externalBranchId,
+              BOOK_PART_TAX_ID: 0,
+              BOOK_PART_ID: runningNo,
+              DESCRIPTION: 'CGST',
+              TAX_PERC: cgstPerc,
+              APPLIED_AMT: unitPrice,
+              ROW_STATE: 0,
+              TaxValue: cgstValue,
+              TAX_TYPE_ID: 12,
+              RUNNING_NO: 0,
+            },
+            {
+              DEALER_ID: branch.dealerId,
+              BRANCH_ID: branch.externalBranchId,
+              BOOK_PART_TAX_ID: 0,
+              BOOK_PART_ID: runningNo,
+              DESCRIPTION: 'SGST',
+              TAX_PERC: sgstPerc,
+              APPLIED_AMT: unitPrice,
+              ROW_STATE: 0,
+              TaxValue: sgstValue,
+              TAX_TYPE_ID: 11,
+              RUNNING_NO: 0,
+            },
+          ],
+          BookingSchemeList: null,
+          AppVehicleSchemeList: [],
+          SelectedVehicleSchemeList: null,
+          AccessoryList: null,
+          AllotmentList: null,
+          SERIES: catalogEntry.series || null,
+          IS_EV_VEH: catalogEntry.isEvModel || false,
+          VEHICLE_SCH_ID: null,
+          ApplicableTax: null,
+          AccInvDetails: null,
+          modelPartList,
+        },
+      ],
+    };
+
+    console.log('SetBookingLineItem request:', JSON.stringify(requestBody, null, 2));
+
+    const apiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SetBookingLineItem';
+    const apiResponse = await axios.post(apiUrl, requestBody, {
+      headers: {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.advantagetvs.in',
+        'Referer': 'https://www.advantagetvs.in/LiteApp/',
+      },
+      timeout: 30000,
+    });
+
+    console.log('SetBookingLineItem response:', JSON.stringify(apiResponse.data, null, 2));
+
+    // Cache the response
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `set-line-item-${enquiryId}.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      enquiryId: String(enquiryId),
+      partId,
+      modelId: catalogEntry.modelId,
+      setBy: user.username,
+      setAt: new Date().toISOString(),
+      request: requestBody,
+      response: apiResponse.data,
+    }, null, 2), 'utf-8');
+
+    res.json({
+      success: true,
+      data: apiResponse.data,
+      cachedAs: `set-line-item-${enquiryId}.json`,
+    });
+
+  } catch (error: any) {
+    console.error('Error in setBookingLineItem:', error);
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 401) {
+        return res.status(502).json({ success: false, error: 'TVS API: Invalid or expired token' });
+      }
+      return res.status(error.response?.status === 401 ? 502 : (error.response?.status || 500)).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+        details: error.response?.data,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to set booking line item' });
+  }
+};
+
+// ==================== SAVE BOOKING ====================
+// Constructs and calls TVS SaveBooking API using pre-booking cache + SetBookingLineItem response
+export const saveBooking = async (req: AuthRequest, res: Response) => {
+  try {
+    const { bookingData, lineItemData, enquiryId: reqEnquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated' });
     }
 
     const user = await prisma.user.findUnique({
@@ -1435,7 +1781,7 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
           user.externalUserId || 0
         );
       } catch (e: any) {
-        return res.status(400).json({ success: false, error: `Token generation failed: ${e.message}` });
+        return res.status(502).json({ success: false, error: `TVS token generation failed: ${e.message}` });
       }
     }
 
@@ -1443,11 +1789,65 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, error: 'No auth token available' });
     }
 
+    // Determine enquiry ID
+    const enquiryId = reqEnquiryId || bookingData?.ENQUIRY_ID || bookingData?.ENQUIRY_NO || 'unknown';
+
+    // Load pre-booking cache to get the base booking data
+    ensureEnquiryCacheDir();
+    let preBookingData: any = null;
+    const preBookingCachePath = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+    if (fs.existsSync(preBookingCachePath)) {
+      try {
+        const raw = fs.readFileSync(preBookingCachePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        preBookingData = parsed.response?.data || parsed.response || parsed;
+      } catch (e) {
+        console.error('Failed to read pre-booking cache:', e);
+      }
+    }
+
+    // Build the final booking request
+    // Priority: lineItemData (authoritative from TVS) > pre-booking cache > bookingData (frontend confirmed values)
+    let finalBookingData: any;
+
+    if (!preBookingData && !bookingData) {
+      return res.status(400).json({ success: false, error: 'No booking data available. Please fetch pre-booking first.' });
+    }
+
+    // Start with pre-booking base (from GetPreBooking API response)
+    const base = preBookingData || {};
+
+    // Apply user-confirmed values from the modal
+    const confirmedAmt = bookingData?.BOOKING_AMT || 0;
+    const confirmedTotUnitPrice = bookingData?.TOT_UNIT_PRICE ?? base.TOT_UNIT_PRICE ?? 0;
+    const confirmedAccChrgs = bookingData?.TOT_ACC_CHRGS ?? base.TOT_ACC_CHRGS ?? 0;
+    const confirmedRegChrgs = bookingData?.TOT_REG_CHRGS ?? base.TOT_REG_CHRGS ?? 0;
+    const confirmedLineDisc = bookingData?.TOT_LINE_DISC ?? base.TOT_LINE_DISC ?? 0;
+    const confirmedInsCharges = bookingData?.INS_CHARGES ?? base.INS_CHARGES ?? 0;
+
+    // Merge line item data into BookingPartDetails
+    const partDetails = lineItemData
+      ? [lineItemData]
+      : base.BookingPartDetails || base.BookPartDetailsList || [];
+
+    finalBookingData = {
+      ...base,
+      BOOKING_AMT: confirmedAmt,
+      TOT_UNIT_PRICE: confirmedTotUnitPrice,
+      TOT_ACC_CHRGS: confirmedAccChrgs,
+      TOT_REG_CHRGS: confirmedRegChrgs,
+      TOT_LINE_DISC: confirmedLineDisc,
+      INS_CHARGES: confirmedInsCharges,
+      BookingPartDetails: partDetails,
+    };
+
+    console.log('SaveBooking: Merged payload with confirmed values from modal');
+
     const apiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SaveBooking';
 
-    console.log('SaveBooking request:', JSON.stringify(bookingData, null, 2));
+    console.log('SaveBooking request:', JSON.stringify(finalBookingData, null, 2));
 
-    const response = await axios.post(apiUrl, bookingData, {
+    const response = await axios.post(apiUrl, finalBookingData, {
       headers: {
         'Content-Type': 'application/json;charset=UTF-8',
         'Authorization': `Bearer ${token}`,
@@ -1462,14 +1862,13 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
     console.log('SaveBooking response status:', response.status);
 
     // Cache the response
-    ensureEnquiryCacheDir();
-    const enquiryId = bookingData.ENQUIRY_ID || bookingData.ENQUIRY_NO || 'unknown';
     const cacheFile = path.join(ENQUIRY_CACHE_DIR, `save-booking-${enquiryId}.json`);
     fs.writeFileSync(cacheFile, JSON.stringify({
       enquiryId: String(enquiryId),
       savedBy: user.username,
       savedAt: new Date().toISOString(),
-      request: bookingData,
+      request: finalBookingData,
+      lineItemData: lineItemData || null,
       response: responseData,
     }, null, 2), 'utf-8');
 
@@ -1492,10 +1891,12 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
 };
 
 // ==================== SUBMIT VOUCHER ====================
-// Constructs and submits voucher using SaveBooking response data + branch config
+// Constructs and submits voucher using enquiry/booking data + branch config.
+// Called twice: 1st with BOOK_PART_ID before SaveBooking, 2nd with BOOKING_NO after SaveBooking.
+// Pass documentIdOverride to use a specific DOCUMENT_ID/DOC_NO/DOC_ID (e.g. BOOKING_NO for the 2nd call).
 export const submitVoucher = async (req: AuthRequest, res: Response) => {
   try {
-    const { saveBookingResponse, bookingAmount } = req.body;
+    const { saveBookingResponse, bookingAmount, lineItemData, documentIdOverride, enquiryId: reqEnquiryId } = req.body;
     const userId = req.user?.id;
     const branchId = req.user?.branchId;
 
@@ -1503,8 +1904,8 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ success: false, error: 'User not authenticated' });
     }
 
-    if (!saveBookingResponse || !bookingAmount) {
-      return res.status(400).json({ success: false, error: 'saveBookingResponse and bookingAmount are required' });
+    if (!bookingAmount) {
+      return res.status(400).json({ success: false, error: 'bookingAmount is required' });
     }
 
     const user = await prisma.user.findUnique({
@@ -1545,21 +1946,139 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}`;
     const isoDate = today.toISOString();
 
-    // Extract data from SaveBooking response
-    const sbr = saveBookingResponse;
-    const dealerId = sbr.DEALER_ID || branch.dealerId;
-    const branchIdExt = sbr.BRANCH_ID || branch.externalBranchId;
-    const customerName = sbr.CUSTOMER_NAME || sbr.PARTY_NAME || '';
-    const customerId = sbr.CUSTOMER_ID || '';
-    const slCode = sbr.SL_CODE || '';
-    const bookPartId = sbr.BookPartDetailsList?.[0]?.BOOK_PART_ID || sbr.BOOK_PART_ID || 0;
+    // Load pre-booking cache for fallback data (CUSTOMER_ID, names, etc.)
+    let preBookingCache: any = null;
+    const voucherEnquiryId = reqEnquiryId || '';
+    if (voucherEnquiryId) {
+      ensureEnquiryCacheDir();
+      const pbCachePath = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${voucherEnquiryId}.json`);
+      if (fs.existsSync(pbCachePath)) {
+        try {
+          const raw = fs.readFileSync(pbCachePath, 'utf-8');
+          const parsed = JSON.parse(raw);
+          preBookingCache = parsed.response?.data || parsed.response || parsed;
+        } catch (e) {
+          console.warn('Failed to read pre-booking cache for voucher:', e);
+        }
+      }
+    }
+
+    // Navigate into nested response: { BookingDet: {...}, Customer: {...} }
+    const bookingDet = saveBookingResponse?.BookingDet || saveBookingResponse || {};
+    const customerDet = saveBookingResponse?.Customer || {};
+    const lid = lineItemData || {};
+    const pb = preBookingCache || {};
+    const dealerId = bookingDet.DEALER_ID || lid.DEALER_ID || branch.dealerId;
+    const branchIdExt = bookingDet.BRANCH_ID || lid.BRANCH_ID || branch.externalBranchId;
+    const customerName = customerDet.CUST_NAME || bookingDet.CUSTOMER_NAME || bookingDet.PARTY_NAME || pb.CUSTOMER_NAME || '';
+    const customerId = bookingDet.CUSTOMER_ID || customerDet.CUSTOMER_ID || lid.CUSTOMER_ID || pb.CUSTOMER_ID || '';
+    const bookPartId = bookingDet.BookPartDetailsList?.[0]?.BOOK_PART_ID || bookingDet.BOOK_PART_ID || lid.BOOK_PART_ID || 0;
     const amount = Number(bookingAmount);
+
+    // documentIdOverride allows the 2nd voucher call to use BOOKING_NO instead of BOOK_PART_ID
+    const documentId = documentIdOverride || bookPartId;
+
+    console.log(`Voucher [${documentIdOverride ? '2nd call - BOOKING_NO' : '1st call - BOOK_PART_ID'}] — documentId: ${documentId}, bookPartId: ${bookPartId}, override: ${documentIdOverride || 'none'}`);
+
+    // Use Customer.SL_CODE from SaveBooking response first, then BookingDet.SL_CODE, then API fallback
+    let slCode = customerDet.SL_CODE || bookingDet.SL_CODE || '';
+    if (!slCode) {
+      if (!customerId) {
+        return res.status(400).json({
+          success: false,
+          error: 'CUSTOMER_ID not found in SaveBooking response. Cannot fetch SL_CODE.',
+        });
+      }
+
+      try {
+        console.log('Fetching SL_CODE for CUSTOMER_ID:', customerId);
+        const slResponse = await axios.post(
+          'https://www.advantagetvs.in/OnlineSalesWebAPI/Voucher/GetSLCodeByCustomerID',
+          {
+            DEALER_ID: dealerId,
+            Ref_Id: customerId,
+            Party_Cat: 'Customer',
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json;charset=UTF-8',
+              'Authorization': `Bearer ${token}`,
+              'Accept': 'application/json, text/plain, */*',
+              'Origin': 'https://www.advantagetvs.in',
+              'Referer': 'https://www.advantagetvs.in/LiteApp/',
+            },
+            timeout: 30000,
+          }
+        );
+
+        console.log('GetSLCodeByCustomerID response:', JSON.stringify(slResponse.data, null, 2));
+        slCode = slResponse.data?.data?.SL_CODE
+          || slResponse.data?.SL_CODE
+          || slResponse.data?.data
+          || '';
+
+        if (typeof slCode === 'object') {
+          slCode = slCode.SL_CODE || '';
+        }
+      } catch (slError: any) {
+        console.error('GetSLCodeByCustomerID failed:', slError.response?.data || slError.message);
+        return res.status(400).json({
+          success: false,
+          error: `Failed to fetch SL_CODE for Customer ID ${customerId}: ${slError.response?.data?.message || slError.message}`,
+        });
+      }
+    }
 
     if (!slCode) {
       return res.status(400).json({
         success: false,
-        error: 'SL_CODE not found in SaveBooking response. Cannot construct voucher.',
+        error: `SL_CODE not found for Customer ID ${customerId}. Cannot construct voucher.`,
       });
+    }
+
+    // Fetch account mapping from TVS for authoritative GL codes (fallback to branch config)
+    let glCodeDebit = config.GL_CODE_DEBIT;
+    let glCodeCredit = config.GL_CODE_CREDIT;
+    let glDescDebit = config.GL_DESC_DEBIT;
+    let glDescCredit = config.GL_DESC_CREDIT;
+    let bankId: any = null;
+
+    try {
+      console.log('Fetching GetAccountMapping...');
+      const accMapResponse = await axios.post(
+        'https://www.advantagetvs.in/OnlineSalesWebAPI/Voucher/GetAccountMapping',
+        {
+          DEALER_ID: dealerId,
+          COMPANY_ID: config.COMPANY_ID,
+          DOC_ID: 1,
+          payment_mode_id: config.PAYMENT_MODE_ID,
+          VOUCHER_TYPE: config.VCHR_TYPE_ID,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': 'https://www.advantagetvs.in',
+            'Referer': 'https://www.advantagetvs.in/LiteApp/',
+          },
+          timeout: 30000,
+        }
+      );
+
+      console.log('GetAccountMapping response:', JSON.stringify(accMapResponse.data, null, 2));
+
+      const accMap = accMapResponse.data?.data;
+      if (accMap) {
+        glCodeDebit = accMap.debit_gl_id || glCodeDebit;
+        glCodeCredit = accMap.credit_gl_id || glCodeCredit;
+        glDescDebit = accMap.Gen_Desc_Debt || glDescDebit;
+        glDescCredit = accMap.Gen_Desc || glDescCredit;
+        bankId = accMap.bank_id ?? null;
+        console.log(`AccountMapping: Debit GL=${glCodeDebit} (${glDescDebit}), Credit GL=${glCodeCredit} (${glDescCredit}), Bank=${bankId}`);
+      }
+    } catch (accMapError: any) {
+      console.warn('GetAccountMapping failed, using branch config defaults:', accMapError.response?.data || accMapError.message);
     }
 
     // Construct voucher request body
@@ -1576,8 +2095,8 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       FIN_YEAR: finYear,
       COMPANY_ID: String(config.COMPANY_ID),
       PAYMENT_MODE_ID: config.PAYMENT_MODE_ID,
-      DOCUMENT_ID: bookPartId,
-      DOC_NO: bookPartId,
+      DOCUMENT_ID: documentId,
+      DOC_NO: documentId,
       DOC_TYPE: 1,
       DOC_DATE: dateStr,
       ST_DOC_DATE: dateStr,
@@ -1594,7 +2113,7 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       CRED_CARD_EXP_DT: null,
       APPROVAL_NO: null,
       BANK_BRANCH: null,
-      BANK_ID: null,
+      BANK_ID: bankId,
       BASE_VOUCHER_ID: null,
       UNRECON_VAL: amount,
       CRED_LMT_TYPE: 1,
@@ -1602,14 +2121,14 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       ACTIVE: 'true',
       VOUCHER_ACC_DETAILS: [
         {
-          GL_CODE: config.GL_CODE_DEBIT,
+          GL_CODE: glCodeDebit,
           SL_CODE: '',
           ACC_VALUE: String(amount),
           CREDIT_LIMIT_TYPE: '1',
           IS_DEBIT: true,
         },
         {
-          GL_CODE: config.GL_CODE_CREDIT,
+          GL_CODE: glCodeCredit,
           SL_CODE: slCode,
           ACC_VALUE: String(amount),
           CREDIT_LIMIT_TYPE: '1',
@@ -1626,13 +2145,13 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
           PARTY_CAT: '1',
           PARTY_CODE: String(customerId),
           VOUCHER_STATUS: '1',
-          DOC_ID: bookPartId,
+          DOC_ID: documentId,
           payment_mode_id: config.PAYMENT_MODE_ID,
           VOUCHER_TYPE: config.VCHR_TYPE_ID,
           COMPANY_ID: String(config.COMPANY_ID),
-          bank_id: null,
-          GL_CODE: config.GL_CODE_DEBIT,
-          Gen_Desc: config.GL_DESC_DEBIT,
+          bank_id: bankId,
+          GL_CODE: glCodeDebit,
+          Gen_Desc: glDescDebit,
           SL_CODE: '',
           Sub_Desc: '',
           VCHR_VALUE: String(amount),
@@ -1647,13 +2166,13 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
           PARTY_CAT: '1',
           PARTY_CODE: String(customerId),
           VOUCHER_STATUS: '1',
-          DOC_ID: bookPartId,
+          DOC_ID: documentId,
           payment_mode_id: config.PAYMENT_MODE_ID,
           VOUCHER_TYPE: config.VCHR_TYPE_ID,
           COMPANY_ID: String(config.COMPANY_ID),
-          bank_id: null,
-          GL_CODE: config.GL_CODE_CREDIT,
-          Gen_Desc: config.GL_DESC_CREDIT,
+          bank_id: bankId,
+          GL_CODE: glCodeCredit,
+          Gen_Desc: glDescCredit,
           SL_CODE: slCode,
           Sub_Desc: customerName,
           VCHR_VALUE: String(amount),
@@ -1664,7 +2183,6 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
 
     console.log('Voucher request body:', JSON.stringify(voucherBody, null, 2));
 
-    // TODO: Replace with actual voucher API URL when confirmed
     const voucherApiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Voucher/SaveVoucher';
 
     const voucherResponse = await axios.post(voucherApiUrl, voucherBody, {
@@ -1678,12 +2196,15 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       timeout: 30000,
     });
 
-    // Cache the voucher submission
+    // Cache the voucher submission (suffix distinguishes 1st vs 2nd call)
     ensureEnquiryCacheDir();
-    const enquiryId = sbr.ENQUIRY_ID || sbr.ENQUIRY_NO || 'unknown';
-    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `voucher-${enquiryId}.json`);
+    const enquiryId = bookingDet.ENQUIRY_ID || bookingDet.ENQUIRY_NO || voucherEnquiryId || lid.ENQUIRY_ID || 'unknown';
+    const voucherLabel = documentIdOverride ? 'voucher-2' : 'voucher-1';
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `${voucherLabel}-${enquiryId}.json`);
     fs.writeFileSync(cacheFile, JSON.stringify({
       enquiryId: String(enquiryId),
+      voucherCall: documentIdOverride ? '2nd (BOOKING_NO)' : '1st (BOOK_PART_ID)',
+      documentId,
       submittedBy: user.username,
       submittedAt: new Date().toISOString(),
       request: voucherBody,
@@ -1694,7 +2215,7 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       success: true,
       data: voucherResponse.data,
       voucherBody,
-      cachedAs: `voucher-${enquiryId}.json`,
+      cachedAs: `${voucherLabel}-${enquiryId}.json`,
     });
 
   } catch (error: any) {

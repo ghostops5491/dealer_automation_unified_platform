@@ -6,6 +6,7 @@ import {
   populateEnquiryById,
   fetchPreBooking,
   fetchModelParts,
+  setBookingLineItem,
   saveBooking,
   submitVoucher,
   getCachedEnquiry,
@@ -47,6 +48,9 @@ router.post('/fetch-pre-booking', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE
 
 // Fetch model parts by MODEL_ID from TVS API and populate VehicleCatalog
 router.post('/fetch-model-parts', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), fetchModelParts);
+
+// Set Booking Line Item (model/part selection before SaveBooking)
+router.post('/set-booking-line-item', requireRole('MANAGER', 'ASSOCIATE'), setBookingLineItem);
 
 // Save Booking via TVS API
 router.post('/save-booking', requireRole('MANAGER', 'ASSOCIATE'), saveBooking);

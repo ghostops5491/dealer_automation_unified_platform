@@ -27,7 +27,7 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { useAuthStore } from '@/store/auth';
-import { flowApi, formApi, externalApi, jobApi, vehicleCatalogApi } from '@/lib/api';
+import { flowApi, formApi, externalApi, vehicleCatalogApi } from '@/lib/api';
 import { parseOptions, cn } from '@/lib/utils';
 import type { FormSubmission, ScreenField, FlowScreen } from '@/types';
 
@@ -64,12 +64,23 @@ export function FormFill() {
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchedEnquiryNo, setFetchedEnquiryNo] = useState<string | null>(null);
   
-  // Booking Job state
-  const [, setBookingJobId] = useState<string | null>(null);
-  const [, setBookingJobStatus] = useState<string | null>(null);
-  const [, setBookingLoading] = useState(false);
-  const [, setIsBookedEnquiry] = useState(false);
+  // Booking confirmation modal state
   const [showBookingConfirm, setShowBookingConfirm] = useState(false);
+  const [bookingConfirmData, setBookingConfirmData] = useState<{
+    lineItemData: any;
+    brand: string;
+    model: string;
+    variant: string;
+    quantity: number;
+    unitPrice: number;
+    exShowroomPrice: number;
+    accCharges: number;
+    discount: number;
+    manualDiscount: number;
+    regCharges: number;
+    insCharges: number;
+    bookingAmt: number;
+  } | null>(null);
   
   // Dynamic options added from API response (e.g. ENQUIRY_DESCRIPTION)
   const [dynamicEnquiryOptions, setDynamicEnquiryOptions] = useState<{ value: string; label: string }[]>([]);
@@ -241,59 +252,92 @@ export function FormFill() {
     }
   };
 
-  // Perform booking job (called after confirmation)
-  const handlePerformBooking = async () => {
+  // Confirm Booking: Voucher(1st) → SaveBooking → Voucher(2nd)
+  const handleConfirmBooking = async () => {
+    if (!bookingConfirmData || !fetchedEnquiryNo) return;
     setShowBookingConfirm(false);
-    if (!fetchedEnquiryNo) {
-      toast({ title: 'No enquiry number available', description: 'Please fetch details first', variant: 'destructive' });
-      return;
-    }
-    
-    setBookingLoading(true);
-    setBookingJobStatus(null);
-    
+    setPerformBookingLoading(true);
+
+    const { lineItemData } = bookingConfirmData;
+    const confirmedAmount = bookingConfirmData.bookingAmt;
+
     try {
-      const response = await jobApi.runBooking(fetchedEnquiryNo);
-      
-      if (response.data.success) {
-        const jobId = response.data.jobId;
-        setBookingJobId(jobId);
-        setBookingJobStatus('running');
-        toast({ title: 'Booking job started', description: `Job ID: ${jobId}` });
-        
-        // Poll for job status
-        const pollInterval = setInterval(async () => {
-          try {
-            const statusResponse = await jobApi.getJobStatus(jobId);
-            const status = statusResponse.data.status;
-            setBookingJobStatus(status);
-            
-            if (status === 'completed') {
-              clearInterval(pollInterval);
-              setBookingLoading(false);
-              toast({ title: 'Booking completed successfully', variant: 'default' });
-            } else if (status === 'failed') {
-              clearInterval(pollInterval);
-              setBookingLoading(false);
-              toast({ title: 'Booking job failed', description: 'Check Jobs menu for details', variant: 'destructive' });
-            }
-          } catch (error) {
-            // Job runner might be down, stop polling
-            clearInterval(pollInterval);
-            setBookingLoading(false);
+      // ── Step 1: SaveVoucher (1st) — uses BOOK_PART_ID as DOCUMENT_ID ──
+      toast({ title: 'Submitting voucher (1/2)...', description: 'Creating pre-booking payment voucher.' });
+      try {
+        const v1 = await externalApi.submitVoucher({
+          bookingAmount: confirmedAmount,
+          lineItemData,
+          enquiryId: fetchedEnquiryNo!,
+        });
+        if (v1.data.success) {
+          toast({ title: 'Voucher 1 submitted', description: 'Pre-booking voucher created.' });
+        } else {
+          toast({ title: 'Voucher 1 warning', description: v1.data.error || 'Pre-booking voucher may have failed.', variant: 'destructive' });
+        }
+      } catch (v1Err: any) {
+        console.error('Voucher 1 error:', v1Err);
+        toast({ title: 'Voucher 1 failed', description: 'Pre-booking voucher failed. Continuing with booking...', variant: 'destructive' });
+      }
+
+      // ── Step 2: SaveBooking with confirmed values ──
+      toast({ title: 'Saving booking...', description: 'Submitting booking to TVS.' });
+      const saveResponse = await externalApi.saveBooking({
+        bookingData: {
+          BOOKING_AMT: confirmedAmount,
+          TOT_UNIT_PRICE: bookingConfirmData.unitPrice * bookingConfirmData.quantity,
+          TOT_ACC_CHRGS: bookingConfirmData.accCharges,
+          TOT_REG_CHRGS: bookingConfirmData.regCharges,
+          TOT_LINE_DISC: bookingConfirmData.discount + bookingConfirmData.manualDiscount,
+          INS_CHARGES: bookingConfirmData.insCharges,
+        },
+        lineItemData,
+        enquiryId: fetchedEnquiryNo,
+      });
+
+      if (saveResponse.data.success) {
+        const sbData = saveResponse.data.data;
+        setSaveBookingResponse(sbData);
+        const bd = sbData?.BookingDet || sbData;
+        const bookingNo = bd.BOOKING_NO || bd.BOOKING_ID;
+
+        // ── Step 3: SaveVoucher (2nd) — uses BOOKING_NO as DOCUMENT_ID ──
+        toast({ title: 'Submitting voucher (2/2)...', description: 'Creating post-booking payment voucher.' });
+        try {
+          const v2 = await externalApi.submitVoucher({
+            saveBookingResponse: sbData,
+            bookingAmount: confirmedAmount,
+            lineItemData,
+            documentIdOverride: bookingNo,
+          });
+          if (v2.data.success) {
+            toast({ title: 'All steps complete', description: 'Booking saved and both vouchers submitted successfully.' });
+          } else {
+            toast({ title: 'Voucher 2 failed', description: v2.data.error || 'Booking saved but post-booking voucher failed.', variant: 'destructive' });
           }
-        }, 2000);
-        
-        // Clear polling after 5 minutes max
-        setTimeout(() => clearInterval(pollInterval), 300000);
+        } catch (v2Err: any) {
+          console.error('Voucher 2 error:', v2Err);
+          toast({ title: 'Voucher 2 failed', description: 'Booking saved but post-booking voucher failed. You can retry later.', variant: 'destructive' });
+        }
+
+        setBookingSectionUnlocked(true);
+        setBookingAmount(String(confirmedAmount));
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: {
+            ...prev['vehicle_details'],
+            booking_amount: confirmedAmount,
+            booking_no: bookingNo || bd.BookPartDetailsList?.[0]?.BOOK_PART_ID || lineItemData?.BOOK_PART_ID || '',
+          },
+        }));
       } else {
-        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
-        setBookingLoading(false);
+        toast({ title: 'Booking failed', description: saveResponse.data.error || 'Failed to save booking.', variant: 'destructive' });
       }
     } catch (error: any) {
-      const errorMsg = error.response?.data?.error || error.message || 'Failed to start booking job';
-      toast({ title: 'Error', description: errorMsg, variant: 'destructive' });
-      setBookingLoading(false);
+      console.error('Perform booking error:', error);
+      toast({ title: 'Booking failed', description: error.response?.data?.error || 'Failed to perform booking.', variant: 'destructive' });
+    } finally {
+      setPerformBookingLoading(false);
     }
   };
 
@@ -445,7 +489,10 @@ export function FormFill() {
     // Track if this enquiry is already booked (check both Booked flag and STATUS_DESC)
     const bookedFlag = data['_booked'] ?? rawData?.Booked ?? 0;
     const statusDesc = (data['_status'] || rawData?.STATUS_DESC || '').toLowerCase();
-    setIsBookedEnquiry(bookedFlag === 1 || statusDesc === 'booked');
+    const _isBooked = bookedFlag === 1 || statusDesc === 'booked';
+    if (_isBooked) {
+      setBookingSectionUnlocked(true);
+    }
     
     // Handle ENQUIRY_DESCRIPTION -> map to enquiry dropdown, add dynamically if not existing
     const enquiryDesc = data['customer_enquiry.enquiry'] || data['_enquiry_description'] || rawData?.ENQUIRY_DESCRIPTION || '';
@@ -1541,59 +1588,48 @@ export function FormFill() {
                     }
                     setPerformBookingLoading(true);
                     try {
-                      // Read cached pre-booking JSON to construct SaveBooking body
-                      const preBookingCache = formData['vehicle_details']?.model_id
-                        ? await externalApi.getCachedEnquiry(`pre-booking-${fetchedEnquiryNo}`).catch(() => null)
-                        : null;
+                      const vehicleData = formData['vehicle_details'] || {};
 
-                      // For now, pass the pre-booking cached response as bookingData
-                      // The actual SaveBooking request body format may need adjustment
-                      const cachedData = preBookingCache?.data?.data?.response || {};
-                      const bookingData = {
-                        ...cachedData,
-                        BOOKING_AMT: Number(bookingAmount),
-                      };
+                      // Step 1: SetBookingLineItem — sets model/part on the booking
+                      toast({ title: 'Setting line item...', description: 'Configuring vehicle details on the booking.' });
+                      const lineItemResponse = await externalApi.setBookingLineItem({
+                        enquiryId: fetchedEnquiryNo!,
+                        brand: vehicleData.brand,
+                        model: vehicleData.model,
+                        variant: vehicleData.variant,
+                      });
 
-                      // Step 1: Call SaveBooking
-                      const saveResponse = await externalApi.saveBooking({ bookingData });
-
-                      if (saveResponse.data.success) {
-                        const sbData = saveResponse.data.data;
-                        setSaveBookingResponse(sbData);
-
-                        // Step 2: Submit Voucher using SaveBooking response
-                        try {
-                          const voucherResponse = await externalApi.submitVoucher({
-                            saveBookingResponse: sbData,
-                            bookingAmount: Number(bookingAmount),
-                          });
-
-                          if (voucherResponse.data.success) {
-                            toast({ title: 'Booking & Voucher submitted', description: 'Booking saved and voucher created successfully.' });
-                          } else {
-                            toast({ title: 'Voucher failed', description: voucherResponse.data.error || 'Booking saved but voucher submission failed.', variant: 'destructive' });
-                          }
-                        } catch (vErr: any) {
-                          console.error('Voucher submission error:', vErr);
-                          toast({ title: 'Voucher failed', description: 'Booking saved but voucher submission failed. You can retry later.', variant: 'destructive' });
-                        }
-
-                        // Unlock post-booking fields
-                        setBookingSectionUnlocked(true);
-                        setFormData((prev: Record<string, any>) => ({
-                          ...prev,
-                          vehicle_details: {
-                            ...prev['vehicle_details'],
-                            booking_amount: bookingAmount,
-                            booking_no: sbData.BOOKING_NO || sbData.BookPartDetailsList?.[0]?.BOOK_PART_ID || '',
-                          },
-                        }));
-                      } else {
-                        toast({ title: 'Booking failed', description: saveResponse.data.error || 'Failed to save booking.', variant: 'destructive' });
+                      if (!lineItemResponse.data.success) {
+                        toast({ title: 'Line item failed', description: lineItemResponse.data.error || 'Failed to set booking line item.', variant: 'destructive' });
+                        setPerformBookingLoading(false);
+                        return;
                       }
+
+                      const lineItemData = Array.isArray(lineItemResponse.data.data)
+                        ? lineItemResponse.data.data[0]
+                        : lineItemResponse.data.data;
+
+                      // Pre-fill modal with data from line item response and existing form
+                      const exShrmPrice = lineItemData?.EX_SHRM_PRICE || lineItemData?.UNIT_PRICE || 0;
+                      setBookingConfirmData({
+                        lineItemData,
+                        brand: vehicleData.brand || lineItemData?.BRAND_NAME || '',
+                        model: vehicleData.model || lineItemData?.MODEL_NAME || '',
+                        variant: vehicleData.variant || lineItemData?.VARIANT_NAME || '',
+                        quantity: lineItemData?.QTY || 1,
+                        unitPrice: lineItemData?.UNIT_PRICE || 0,
+                        exShowroomPrice: exShrmPrice,
+                        accCharges: lineItemData?.ACC_CHRGS || 0,
+                        discount: lineItemData?.LINE_DISC || 0,
+                        manualDiscount: lineItemData?.MAN_DISC || 0,
+                        regCharges: lineItemData?.REG_CHRGS || 0,
+                        insCharges: lineItemData?.INS_CHARGES || 0,
+                        bookingAmt: Number(bookingAmount),
+                      });
+                      setShowBookingConfirm(true);
                     } catch (error: any) {
-                      console.error('Perform booking error:', error);
-                      toast({ title: 'Booking failed', description: error.response?.data?.error || 'Failed to perform booking.', variant: 'destructive' });
+                      console.error('SetBookingLineItem error:', error);
+                      toast({ title: 'Line item failed', description: error.response?.data?.error || 'Failed to set booking line item.', variant: 'destructive' });
                     } finally {
                       setPerformBookingLoading(false);
                     }
@@ -1822,29 +1858,127 @@ export function FormFill() {
         </DialogContent>
       </Dialog>
 
-      {/* Booking Confirmation Dialog */}
-      <Dialog open={showBookingConfirm} onOpenChange={setShowBookingConfirm}>
-        <DialogContent>
+      {/* Booking Confirmation Modal */}
+      <Dialog open={showBookingConfirm} onOpenChange={(open) => { if (!performBookingLoading) setShowBookingConfirm(open); }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirm Booking</DialogTitle>
+            <DialogTitle>Confirm Booking Details</DialogTitle>
             <DialogDescription>
-              Are you sure the customer wants to book enquiry #{fetchedEnquiryNo}
-              {formData['customer_enquiry']?.vehicle_model
-                ? ` for model "${formData['customer_enquiry'].vehicle_model}"`
-                : ''}
-              ?
+              Enquiry #{fetchedEnquiryNo} &mdash; Review and confirm the vehicle and pricing details below.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowBookingConfirm(false)}>
+
+          {bookingConfirmData && (
+            <div className="space-y-4 py-2">
+              {/* Vehicle Info (read-only) */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <Label className="text-xs text-muted-foreground">Brand</Label>
+                  <Input value={bookingConfirmData.brand} disabled className="mt-1" />
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground">Model</Label>
+                  <Input value={bookingConfirmData.model} disabled className="mt-1" />
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground">Variant</Label>
+                  <Input value={bookingConfirmData.variant} disabled className="mt-1" />
+                </div>
+              </div>
+
+              <hr />
+
+              {/* Editable pricing fields */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">Quantity</Label>
+                  <Input type="number" min={1} value={bookingConfirmData.quantity} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, quantity: Number(e.target.value) || 1 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Unit Price</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.unitPrice} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, unitPrice: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Ex-Showroom Price</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.exShowroomPrice} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, exShowroomPrice: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Accessory Charges</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.accCharges} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, accCharges: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Discount</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.discount} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, discount: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Manual Discount</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.manualDiscount} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, manualDiscount: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Registration Charges</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.regCharges} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, regCharges: Number(e.target.value) || 0 } : prev)} />
+                </div>
+                <div>
+                  <Label className="text-xs">Insurance Charges</Label>
+                  <Input type="number" min={0} value={bookingConfirmData.insCharges} className="mt-1"
+                    onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, insCharges: Number(e.target.value) || 0 } : prev)} />
+                </div>
+              </div>
+
+              <hr />
+
+              {/* Booking Amount */}
+              <div className="flex items-center justify-between">
+                <Label className="text-sm font-semibold">Booking Amount</Label>
+                <Input type="number" min={0} className="w-40 text-right font-semibold"
+                  value={bookingConfirmData.bookingAmt}
+                  onChange={(e: any) => setBookingConfirmData(prev => prev ? { ...prev, bookingAmt: Number(e.target.value) || 0 } : prev)} />
+              </div>
+
+              {/* Computed total (informational) */}
+              <div className="flex items-center justify-between text-sm bg-gray-50 p-3 rounded-lg">
+                <span className="text-muted-foreground">Estimated Total</span>
+                <span className="font-bold text-base">
+                  ₹{(
+                    (bookingConfirmData.unitPrice * bookingConfirmData.quantity)
+                    + bookingConfirmData.accCharges
+                    + bookingConfirmData.regCharges
+                    + bookingConfirmData.insCharges
+                    - bookingConfirmData.discount
+                    - bookingConfirmData.manualDiscount
+                  ).toLocaleString('en-IN')}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowBookingConfirm(false)} disabled={performBookingLoading}>
               Cancel
             </Button>
             <Button
-              className="bg-green-600 hover:bg-green-700"
-              onClick={handlePerformBooking}
+              className="bg-green-600 hover:bg-green-700 gap-2"
+              onClick={handleConfirmBooking}
+              disabled={performBookingLoading}
             >
-              <Play className="h-4 w-4 mr-1" />
-              Yes, Perform Booking
+              {performBookingLoading ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4" />
+                  Confirm Booking
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

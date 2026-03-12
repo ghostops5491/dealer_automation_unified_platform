@@ -313,6 +313,7 @@ export function UserDashboard() {
                   { key: 'RTO_ID', label: 'RTO ID' },
                   { key: 'DealerCountry', label: 'Dealer Country' },
                   { key: 'DealerState', label: 'Dealer State' },
+                  { key: 'SALE_MODE', label: 'Sale Mode' },
                 ].map(({ key, label }) => (
                   <div key={key} className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">{label}</label>

@@ -331,9 +331,11 @@ export const externalApi = {
     api.post('/external/fetch-pre-booking', data),
   fetchModelParts: (data: { modelId: string; countryCode?: string }) =>
     api.post('/external/fetch-model-parts', data),
-  saveBooking: (data: { bookingData: any }) =>
+  setBookingLineItem: (data: { enquiryId: string; partId?: string; brand?: string; model?: string; variant?: string }) =>
+    api.post('/external/set-booking-line-item', data),
+  saveBooking: (data: { bookingData: any; lineItemData?: any; enquiryId?: string }) =>
     api.post('/external/save-booking', data),
-  submitVoucher: (data: { saveBookingResponse: any; bookingAmount: number }) =>
+  submitVoucher: (data: { saveBookingResponse?: any; bookingAmount: number; lineItemData?: any; documentIdOverride?: number; enquiryId?: string }) =>
     api.post('/external/submit-voucher', data),
   getCachedEnquiry: (enquiryId: string) =>
     api.get(`/external/enquiry-cache/${enquiryId}`),

@@ -1587,113 +1587,165 @@ export const setBookingLineItem = async (req: AuthRequest, res: Response) => {
       ? allModelParts.map((p: any) => buildModelPartObj(p, catalogEntry))
       : [buildModelPartObj(selectedRawPart, catalogEntry)];
 
-    // Build the request body
+    // ── Build the request body from pre-booking cache data ──
+    const enquiry = preBookingData.Enquiry || {};
+    const customer = preBookingData.Customer || {};
+    const pbParts: any[] = preBookingData.BookingPartDetails || [];
+    const today = new Date();
+    const bookingDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const createdOn = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+    const finYear = Number(getIndianFinancialYear(today));
+
+    // Use the matching part from pre-booking, or first available
+    const matchingPart = pbParts.find((p: any) => p.PART_ID === catalogEntry.partId) || pbParts[0] || booking;
+
+    // Compute totals from the part details
+    const bookedQty = matchingPart.BOOKED_QTY || 1;
+    const totUnitPrice = unitPrice * bookedQty;
+    const totLineDisc = (matchingPart.DISC_VALUE || 0) + (matchingPart.MANUAL_DISC || 0) + (matchingPart.SCHEME_DISC || 0);
+    const totAccChrgs = matchingPart.ACC_CHARGES || 0;
+    const totRegChrgs = matchingPart.REG_CHARGES || 0;
+    const totInsChrgs = matchingPart.INS_CHARGES || 0;
+    const totSubTot = totalAmount;
+    const totAmtDue = totalAmount;
+
+    // Build BookPartDetailsList from pre-booking data, adding modelPartList + ROW_STATE/ROW_SELECT
+    const bookPartDetailsList = pbParts.map((part: any) => ({
+      ...part,
+      ModelPart: part.ModelPart || buildModelPartObj(
+        allModelParts.find((p: any) => p.PART_ID === part.PART_ID) || {},
+        catalogEntry,
+      ),
+      ROW_STATE: 'Created',
+      ROW_SELECT: part.PART_ID === catalogEntry.partId,
+      modelPartList,
+    }));
+
+    // If pre-booking had no parts, construct from catalog
+    if (bookPartDetailsList.length === 0) {
+      bookPartDetailsList.push({
+        SelectedSchemes: null,
+        ActualDiscount: null,
+        DiscountID: 0,
+        schemeDiscount: null,
+        RunningNo: 0,
+        DEALER_ID: branch.dealerId,
+        BRANCH_ID: branch.externalBranchId,
+        BOOK_PART_ID: runningNo,
+        PART_ID: catalogEntry.partId || '',
+        DESCRIPTION: null,
+        MODEL_ID: catalogEntry.modelId || '',
+        UNIT_PRICE: unitPrice,
+        STOCK_AVAILABLE: 0,
+        STOCK_IN_TRANSIT: 0,
+        BOOKED_QTY: 1,
+        RESV_QTY: 0,
+        ALLOTED_QTY: 0,
+        PENDING_QTY: 1,
+        EX_SHRM_PRICE: exShrmPrice,
+        SCHEME_DISC: 0,
+        DISC_VALUE: 0,
+        MASTER_DISC: 0,
+        MANUAL_DISC: 0,
+        TAX: totalTaxPerc,
+        CGST: cgstPerc,
+        SGST: sgstPerc,
+        IGST: null,
+        UTGST: null,
+        CESS: null,
+        HSN_CODE: catalogEntry.hsnCode || '',
+        HSN_ID: catalogEntry.hsnId || 0,
+        TAX_AMOUNT: taxAmount,
+        ACC_CHARGES: 0,
+        REG_CHARGES: 0,
+        INS_CHARGES: 0,
+        OTH_CHARGES: 0,
+        ACCESS_LOCATION_ID: null,
+        TOTAL_AMOUNT: totalAmount,
+        ModelPart: buildModelPartObj(selectedRawPart, catalogEntry),
+        ROW_STATE: 'Created',
+        VEHICLE_ID: 0,
+        STATUS: 0,
+        ALLOT_VEH_ID: null,
+        PART_DESC: null,
+        BookingPartTaxList: [
+          { DEALER_ID: branch.dealerId, BRANCH_ID: branch.externalBranchId, BOOK_PART_TAX_ID: 0, BOOK_PART_ID: runningNo, DESCRIPTION: 'CGST', TAX_PERC: cgstPerc, APPLIED_AMT: unitPrice, ROW_STATE: 0, TaxValue: cgstValue, TAX_TYPE_ID: 12, RUNNING_NO: 0 },
+          { DEALER_ID: branch.dealerId, BRANCH_ID: branch.externalBranchId, BOOK_PART_TAX_ID: 0, BOOK_PART_ID: runningNo, DESCRIPTION: 'SGST', TAX_PERC: sgstPerc, APPLIED_AMT: unitPrice, ROW_STATE: 0, TaxValue: sgstValue, TAX_TYPE_ID: 11, RUNNING_NO: 0 },
+        ],
+        BookingSchemeList: null,
+        AppVehicleSchemeList: [],
+        SelectedVehicleSchemeList: null,
+        AccessoryList: null,
+        AllotmentList: null,
+        SERIES: catalogEntry.series || null,
+        IS_EV_VEH: catalogEntry.isEvModel || false,
+        VEHICLE_SCH_ID: null,
+        ApplicableTax: null,
+        AccInvDetails: null,
+        modelPartList,
+        ROW_SELECT: true,
+      });
+    }
+
     const requestBody = {
-      DEALER_ID: branch.dealerId,
-      BRANCH_ID: branch.externalBranchId,
-      ENQUIRY_ID: Number(enquiryId),
-      AMD_CODE: 0,
-      LocationID: 0,
-      IS_EMAP: null,
-      DealerCountry: pbConfig.DealerCountry || branch.countryCode || 'IN',
-      DealerState: pbConfig.DealerState || 'TG',
-      REG_TYPE_ID: pbConfig.REG_TYPE_ID,
+      IS_ATP_ENABLED: false,
+      Is_TRV: false,
+      TM_APPROVE_STATUS: 0,
+      IS_SERIES_RESTRICTION_ENABLED: false,
+      BOOKING_DATE: bookingDate,
+      RTO_ID: pbConfig.RTO_ID,
+      REGIS_TYPE_ID: pbConfig.REG_TYPE_ID,
       INS_COMP_ID: pbConfig.INS_COMP_ID,
       INS_TYPE_ID: pbConfig.INS_TYPE_ID,
-      RTO_ID: pbConfig.RTO_ID,
-      RunningNo: runningNo,
-      SALE_MODE: pbConfig.SALE_MODE || 4,
-      CUSTOMER_ID: customerId,
-      IsModPartChanged: true,
-      ModelId: catalogEntry.modelId || '',
-      PartId: catalogEntry.partId || '',
-      BookingPartList: [
-        {
-          SelectedSchemes: null,
-          ActualDiscount: null,
-          DiscountID: 0,
-          schemeDiscount: null,
-          RunningNo: 0,
-          DEALER_ID: branch.dealerId,
-          BRANCH_ID: branch.externalBranchId,
-          BOOK_PART_ID: runningNo,
-          PART_ID: catalogEntry.partId || '',
-          DESCRIPTION: null,
-          MODEL_ID: catalogEntry.modelId || '',
-          UNIT_PRICE: unitPrice,
-          STOCK_AVAILABLE: 0,
-          STOCK_IN_TRANSIT: 0,
-          BOOKED_QTY: 1,
-          RESV_QTY: 0,
-          ALLOTED_QTY: 0,
-          PENDING_QTY: 1,
-          EX_SHRM_PRICE: exShrmPrice,
-          SCHEME_DISC: 0,
-          DISC_VALUE: 0,
-          MASTER_DISC: 0,
-          MANUAL_DISC: 0,
-          TAX: totalTaxPerc,
-          CGST: cgstPerc,
-          SGST: sgstPerc,
-          IGST: null,
-          UTGST: null,
-          CESS: null,
-          HSN_CODE: catalogEntry.hsnCode || '',
-          HSN_ID: catalogEntry.hsnId || 0,
-          TAX_AMOUNT: taxAmount,
-          ACC_CHARGES: 0,
-          REG_CHARGES: 0,
-          INS_CHARGES: 0,
-          OTH_CHARGES: 0,
-          ACCESS_LOCATION_ID: null,
-          TOTAL_AMOUNT: totalAmount,
-          ModelPart: buildModelPartObj(selectedRawPart, catalogEntry),
-          ROW_STATE: 0,
-          VEHICLE_ID: 0,
-          STATUS: 0,
-          ALLOT_VEH_ID: null,
-          PART_DESC: null,
-          BookingPartTaxList: [
-            {
-              DEALER_ID: branch.dealerId,
-              BRANCH_ID: branch.externalBranchId,
-              BOOK_PART_TAX_ID: 0,
-              BOOK_PART_ID: runningNo,
-              DESCRIPTION: 'CGST',
-              TAX_PERC: cgstPerc,
-              APPLIED_AMT: unitPrice,
-              ROW_STATE: 0,
-              TaxValue: cgstValue,
-              TAX_TYPE_ID: 12,
-              RUNNING_NO: 0,
-            },
-            {
-              DEALER_ID: branch.dealerId,
-              BRANCH_ID: branch.externalBranchId,
-              BOOK_PART_TAX_ID: 0,
-              BOOK_PART_ID: runningNo,
-              DESCRIPTION: 'SGST',
-              TAX_PERC: sgstPerc,
-              APPLIED_AMT: unitPrice,
-              ROW_STATE: 0,
-              TaxValue: sgstValue,
-              TAX_TYPE_ID: 11,
-              RUNNING_NO: 0,
-            },
-          ],
-          BookingSchemeList: null,
-          AppVehicleSchemeList: [],
-          SelectedVehicleSchemeList: null,
-          AccessoryList: null,
-          AllotmentList: null,
-          SERIES: catalogEntry.series || null,
-          IS_EV_VEH: catalogEntry.isEvModel || false,
-          VEHICLE_SCH_ID: null,
-          ApplicableTax: null,
-          AccInvDetails: null,
-          modelPartList,
-        },
-      ],
+      ENQUIRY_ID: enquiry.ENQUIRY_ID || Number(enquiryId),
+      ENQUIRY_NO: enquiry.ENQUIRY_NO || Number(enquiryId),
+      BOOKING_TYPE: false,
+      ENQUIRY_DATE: enquiry.ENQUIRY_DATE || '',
+      BOOKING_TYPE_DESC: 'Single',
+      REF_CUST_ID: enquiry.REFERRAL_CUSTOMER_ID || null,
+      END_USER_ID: enquiry.END_USER_ID || customer.CUSTOMER_ID || customerId,
+      REFERRAL_CUSTOMER_NAME: enquiry.REFERRAL_CUSTOMER_NAME || null,
+      REFERRAL_CUSTOMER_TYPE: enquiry.REFERRAL_CUSTOMER_TYPE || null,
+      REFERRAL_CUSTOMER_MOBILE_NUMBER: enquiry.REFERRAL_CUSTOMER_MOBILE_NUMBER || null,
+      BOOKING_AMT: 0,
+      BOOKING_NO: null,
+      RefCustomerType: enquiry.RefCustomerType || null,
+      SALESMAN_ID: enquiry.SALESMAN_ID || 1,
+      CUSTOMER_NAME: customer.CUST_NAME || '',
+      CUSTOMER_ID: customer.CUSTOMER_ID || enquiry.CUSTOMER_ID || customerId,
+      CUSTOMER_TYPE: customer.CUSTOMER_TYPE || 'Individual',
+      SL_CODE: customer.SL_CODE || 0,
+      TOT_UNIT_PRICE: totUnitPrice,
+      TOT_LINE_DISC: totLineDisc,
+      TOT_TAX_VAL: taxAmount,
+      TOT_REG_CHRGS: totRegChrgs,
+      TOT_ACC_CHRGS: totAccChrgs,
+      TOT_SUB_TOT1: totSubTot,
+      TOT_SUB_TOT2: totSubTot,
+      TOT_BILL_DISC: 0,
+      TOT_AMT_DUE: totAmtDue,
+      TOT_AMT_PNDG: totAmtDue,
+      TOT_ADV_AMT: 0,
+      TOT_RFND_AMT: 0,
+      QUOTATION_NO: '',
+      QUOTATION_DATE: '',
+      END_USER: null,
+      BookPartDetailsList: bookPartDetailsList,
+      ROW_STATE: 'Created',
+      CREATED_BY: pbConfig.CREATED_BY || 0,
+      CREATED_ON: createdOn,
+      ACTIVE: true,
+      STATUS: 1,
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      FIN_YEAR: finYear,
+      COUNTRY_CODE: pbConfig.DealerCountry || branch.countryCode || 'IN',
+      SALE_MODE: enquiry.SALE_MODE || pbConfig.SALE_MODE || 4,
+      SLF_ARNGD_HP: false,
+      SelfHPDetails: null,
+      ExchangeBookList: [],
+      CUST_DEL_DATE: '',
+      DLR_DEL_DATE: '',
     };
 
     console.log('SetBookingLineItem request:', JSON.stringify(requestBody, null, 2));
@@ -1712,7 +1764,40 @@ export const setBookingLineItem = async (req: AuthRequest, res: Response) => {
 
     console.log('SetBookingLineItem response:', JSON.stringify(apiResponse.data, null, 2));
 
-    // Cache the response
+    // Check TVS-level statusCode (TVS returns HTTP 200 even on errors)
+    const tvsStatus = apiResponse.data?.statusCode;
+    if (tvsStatus && tvsStatus !== 200) {
+      const tvsMsg = apiResponse.data?.message || 'SetBookingLineItem failed on TVS';
+      console.error('SetBookingLineItem TVS error:', tvsMsg);
+
+      // Still cache for debugging
+      ensureEnquiryCacheDir();
+      const errCacheFile = path.join(ENQUIRY_CACHE_DIR, `set-line-item-error-${enquiryId}.json`);
+      fs.writeFileSync(errCacheFile, JSON.stringify({
+        enquiryId: String(enquiryId),
+        error: tvsMsg,
+        setBy: user.username,
+        setAt: new Date().toISOString(),
+        request: requestBody,
+        response: apiResponse.data,
+      }, null, 2), 'utf-8');
+
+      return res.status(502).json({
+        success: false,
+        error: tvsMsg,
+        tvsStatusCode: tvsStatus,
+        details: apiResponse.data,
+      });
+    }
+
+    // TVS SetBookingLineItem is a "setter" — it often returns data: null on success.
+    // When that happens, the pre-booking BookingPartDetails[0] (with BOOK_PART_ID, pricing,
+    // taxes) is the authoritative line item data that TVS just accepted.
+    const tvsData = apiResponse.data?.data;
+    const preBookingPart = preBookingData.BookingPartDetails?.[0] || null;
+    const effectiveData = tvsData || preBookingPart;
+
+    // Cache the successful response
     const cacheFile = path.join(ENQUIRY_CACHE_DIR, `set-line-item-${enquiryId}.json`);
     fs.writeFileSync(cacheFile, JSON.stringify({
       enquiryId: String(enquiryId),
@@ -1722,11 +1807,14 @@ export const setBookingLineItem = async (req: AuthRequest, res: Response) => {
       setAt: new Date().toISOString(),
       request: requestBody,
       response: apiResponse.data,
+      preBookingPart,
     }, null, 2), 'utf-8');
 
     res.json({
       success: true,
-      data: apiResponse.data,
+      data: effectiveData,
+      requestPartData: requestBody.BookPartDetailsList?.[0] || null,
+      setLineItemRequest: requestBody,
       cachedAs: `set-line-item-${enquiryId}.json`,
     });
 
@@ -1789,11 +1877,24 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, error: 'No auth token available' });
     }
 
-    // Determine enquiry ID
     const enquiryId = reqEnquiryId || bookingData?.ENQUIRY_ID || bookingData?.ENQUIRY_NO || 'unknown';
-
-    // Load pre-booking cache to get the base booking data
     ensureEnquiryCacheDir();
+
+    // The set-line-item cache already has the correctly structured request body
+    // (flat top-level fields, BookPartDetailsList with modelPartList, taxes, etc.)
+    let setLineItemRequest: any = null;
+    const sliCachePath = path.join(ENQUIRY_CACHE_DIR, `set-line-item-${enquiryId}.json`);
+    if (fs.existsSync(sliCachePath)) {
+      try {
+        const raw = fs.readFileSync(sliCachePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        setLineItemRequest = parsed.request;
+      } catch (e) {
+        console.error('Failed to read set-line-item cache:', e);
+      }
+    }
+
+    // Fallback: load pre-booking cache if set-line-item cache is missing
     let preBookingData: any = null;
     const preBookingCachePath = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
     if (fs.existsSync(preBookingCachePath)) {
@@ -1806,42 +1907,127 @@ export const saveBooking = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Build the final booking request
-    // Priority: lineItemData (authoritative from TVS) > pre-booking cache > bookingData (frontend confirmed values)
-    let finalBookingData: any;
-
-    if (!preBookingData && !bookingData) {
-      return res.status(400).json({ success: false, error: 'No booking data available. Please fetch pre-booking first.' });
+    if (!setLineItemRequest && !preBookingData && !bookingData) {
+      return res.status(400).json({ success: false, error: 'No booking data available. Please run SetBookingLineItem first.' });
     }
 
-    // Start with pre-booking base (from GetPreBooking API response)
-    const base = preBookingData || {};
-
-    // Apply user-confirmed values from the modal
+    // Modal-confirmed values from the frontend
     const confirmedAmt = bookingData?.BOOKING_AMT || 0;
-    const confirmedTotUnitPrice = bookingData?.TOT_UNIT_PRICE ?? base.TOT_UNIT_PRICE ?? 0;
-    const confirmedAccChrgs = bookingData?.TOT_ACC_CHRGS ?? base.TOT_ACC_CHRGS ?? 0;
-    const confirmedRegChrgs = bookingData?.TOT_REG_CHRGS ?? base.TOT_REG_CHRGS ?? 0;
-    const confirmedLineDisc = bookingData?.TOT_LINE_DISC ?? base.TOT_LINE_DISC ?? 0;
-    const confirmedInsCharges = bookingData?.INS_CHARGES ?? base.INS_CHARGES ?? 0;
+    const confirmedTotUnitPrice = bookingData?.TOT_UNIT_PRICE ?? 0;
+    const confirmedAccChrgs = bookingData?.TOT_ACC_CHRGS ?? 0;
+    const confirmedRegChrgs = bookingData?.TOT_REG_CHRGS ?? 0;
+    const confirmedLineDisc = bookingData?.TOT_LINE_DISC ?? 0;
+    const confirmedInsCharges = bookingData?.INS_CHARGES ?? 0;
 
-    // Merge line item data into BookingPartDetails
-    const partDetails = lineItemData
-      ? [lineItemData]
-      : base.BookingPartDetails || base.BookPartDetailsList || [];
+    let finalBookingData: any;
 
-    finalBookingData = {
-      ...base,
-      BOOKING_AMT: confirmedAmt,
-      TOT_UNIT_PRICE: confirmedTotUnitPrice,
-      TOT_ACC_CHRGS: confirmedAccChrgs,
-      TOT_REG_CHRGS: confirmedRegChrgs,
-      TOT_LINE_DISC: confirmedLineDisc,
-      INS_CHARGES: confirmedInsCharges,
-      BookingPartDetails: partDetails,
-    };
+    if (setLineItemRequest) {
+      // Best path: use the exact same structure that was sent to SetBookingLineItem
+      // (already flat, has BookPartDetailsList, modelPartList, taxes, etc.)
+      // Override only the values the user confirmed in the modal
+      const totTax = confirmedTotUnitPrice > 0
+        ? (setLineItemRequest.TOT_TAX_VAL ?? Math.round((confirmedTotUnitPrice * 0.18) * 100) / 100)
+        : (setLineItemRequest.TOT_TAX_VAL ?? 0);
+      const totSubTot = confirmedTotUnitPrice + totTax + confirmedAccChrgs + confirmedRegChrgs - confirmedLineDisc;
 
-    console.log('SaveBooking: Merged payload with confirmed values from modal');
+      finalBookingData = {
+        ...setLineItemRequest,
+        BOOKING_AMT: confirmedAmt,
+        TOT_UNIT_PRICE: confirmedTotUnitPrice,
+        TOT_ACC_CHRGS: confirmedAccChrgs,
+        TOT_REG_CHRGS: confirmedRegChrgs,
+        TOT_LINE_DISC: confirmedLineDisc,
+        INS_CHARGES: confirmedInsCharges,
+        TOT_TAX_VAL: totTax,
+        TOT_SUB_TOT1: totSubTot,
+        TOT_SUB_TOT2: totSubTot,
+        TOT_AMT_DUE: totSubTot,
+        TOT_AMT_PNDG: totSubTot,
+      };
+      console.log('SaveBooking: Using set-line-item cached request as base, applied modal overrides');
+    } else {
+      // Fallback: build from pre-booking cache (less ideal but functional)
+      const pb = preBookingData || {};
+      const enquiry = pb.Enquiry || {};
+      const customer = pb.Customer || {};
+      const pbParts: any[] = pb.BookingPartDetails || [];
+      const part0 = pbParts[0] || {};
+
+      const pbConfig = await getBranchConfig(branchId);
+      const today = new Date();
+      const bookingDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      const createdOn = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+      const finYear = Number(getIndianFinancialYear(today));
+      const unitPrice = part0.UNIT_PRICE || part0.EX_SHRM_PRICE || 0;
+      const taxAmount = part0.TAX_AMOUNT || 0;
+      const totalAmt = part0.TOTAL_AMOUNT || (unitPrice + taxAmount);
+
+      finalBookingData = {
+        IS_ATP_ENABLED: false,
+        Is_TRV: false,
+        TM_APPROVE_STATUS: 0,
+        IS_SERIES_RESTRICTION_ENABLED: false,
+        BOOKING_DATE: bookingDate,
+        RTO_ID: pbConfig.RTO_ID,
+        REGIS_TYPE_ID: pbConfig.REG_TYPE_ID,
+        INS_COMP_ID: pbConfig.INS_COMP_ID,
+        INS_TYPE_ID: pbConfig.INS_TYPE_ID,
+        ENQUIRY_ID: enquiry.ENQUIRY_ID || Number(enquiryId),
+        ENQUIRY_NO: enquiry.ENQUIRY_NO || Number(enquiryId),
+        BOOKING_TYPE: false,
+        ENQUIRY_DATE: enquiry.ENQUIRY_DATE || '',
+        BOOKING_TYPE_DESC: 'Single',
+        REF_CUST_ID: enquiry.REFERRAL_CUSTOMER_ID || null,
+        END_USER_ID: enquiry.END_USER_ID || customer.CUSTOMER_ID || 0,
+        REFERRAL_CUSTOMER_NAME: enquiry.REFERRAL_CUSTOMER_NAME || null,
+        REFERRAL_CUSTOMER_TYPE: enquiry.REFERRAL_CUSTOMER_TYPE || null,
+        REFERRAL_CUSTOMER_MOBILE_NUMBER: enquiry.REFERRAL_CUSTOMER_MOBILE_NUMBER || null,
+        BOOKING_AMT: confirmedAmt,
+        BOOKING_NO: null,
+        RefCustomerType: enquiry.RefCustomerType || null,
+        SALESMAN_ID: enquiry.SALESMAN_ID || 1,
+        CUSTOMER_NAME: customer.CUST_NAME || '',
+        CUSTOMER_ID: customer.CUSTOMER_ID || enquiry.CUSTOMER_ID || 0,
+        CUSTOMER_TYPE: customer.CUSTOMER_TYPE || 'Individual',
+        SL_CODE: customer.SL_CODE || null,
+        TOT_UNIT_PRICE: confirmedTotUnitPrice || unitPrice,
+        TOT_LINE_DISC: confirmedLineDisc,
+        TOT_TAX_VAL: taxAmount,
+        TOT_REG_CHRGS: confirmedRegChrgs,
+        TOT_ACC_CHRGS: confirmedAccChrgs,
+        TOT_SUB_TOT1: totalAmt,
+        TOT_SUB_TOT2: totalAmt,
+        TOT_BILL_DISC: 0,
+        TOT_AMT_DUE: totalAmt,
+        TOT_AMT_PNDG: totalAmt,
+        TOT_ADV_AMT: 0,
+        TOT_RFND_AMT: 0,
+        QUOTATION_NO: '',
+        QUOTATION_DATE: '',
+        END_USER: null,
+        BookPartDetailsList: pbParts.map((part: any) => ({
+          ...part,
+          ROW_STATE: 'Created',
+          ROW_SELECT: true,
+        })),
+        ROW_STATE: 'Created',
+        CREATED_BY: pbConfig.CREATED_BY || 0,
+        CREATED_ON: createdOn,
+        ACTIVE: true,
+        STATUS: 1,
+        DEALER_ID: branch.dealerId,
+        BRANCH_ID: branch.externalBranchId,
+        FIN_YEAR: finYear,
+        COUNTRY_CODE: pbConfig.DealerCountry || branch.countryCode || 'IN',
+        SALE_MODE: enquiry.SALE_MODE || pbConfig.SALE_MODE || 4,
+        SLF_ARNGD_HP: false,
+        SelfHPDetails: null,
+        ExchangeBookList: [],
+        CUST_DEL_DATE: '',
+        DLR_DEL_DATE: '',
+      };
+      console.log('SaveBooking: Built payload from pre-booking cache (fallback path)');
+    }
 
     const apiUrl = 'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SaveBooking';
 
@@ -1957,10 +2143,18 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
           const raw = fs.readFileSync(pbCachePath, 'utf-8');
           const parsed = JSON.parse(raw);
           preBookingCache = parsed.response?.data || parsed.response || parsed;
+          console.log('Voucher: Pre-booking cache loaded. Keys:', Object.keys(preBookingCache));
+          console.log('Voucher: pb.Customer?.CUSTOMER_ID =', preBookingCache?.Customer?.CUSTOMER_ID);
+          console.log('Voucher: pb.Enquiry?.CUSTOMER_ID =', preBookingCache?.Enquiry?.CUSTOMER_ID);
+          console.log('Voucher: pb.BookingPartDetails?.[0]?.BOOK_PART_ID =', preBookingCache?.BookingPartDetails?.[0]?.BOOK_PART_ID);
         } catch (e) {
           console.warn('Failed to read pre-booking cache for voucher:', e);
         }
+      } else {
+        console.warn(`Voucher: Pre-booking cache not found at ${pbCachePath}`);
       }
+    } else {
+      console.warn('Voucher: No enquiryId provided — pre-booking cache will NOT be loaded');
     }
 
     // Navigate into nested response: { BookingDet: {...}, Customer: {...} }
@@ -1968,25 +2162,30 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
     const customerDet = saveBookingResponse?.Customer || {};
     const lid = lineItemData || {};
     const pb = preBookingCache || {};
+    const pbCustomer = pb.Customer || {};
+    const pbEnquiry = pb.Enquiry || {};
+    const pbPart0 = pb.BookingPartDetails?.[0] || {};
+
+    // Use nullish coalescing (??) for numeric fields that could legitimately be 0
     const dealerId = bookingDet.DEALER_ID || lid.DEALER_ID || branch.dealerId;
     const branchIdExt = bookingDet.BRANCH_ID || lid.BRANCH_ID || branch.externalBranchId;
-    const customerName = customerDet.CUST_NAME || bookingDet.CUSTOMER_NAME || bookingDet.PARTY_NAME || pb.CUSTOMER_NAME || '';
-    const customerId = bookingDet.CUSTOMER_ID || customerDet.CUSTOMER_ID || lid.CUSTOMER_ID || pb.CUSTOMER_ID || '';
-    const bookPartId = bookingDet.BookPartDetailsList?.[0]?.BOOK_PART_ID || bookingDet.BOOK_PART_ID || lid.BOOK_PART_ID || 0;
+    const customerName = customerDet.CUST_NAME || bookingDet.CUSTOMER_NAME || bookingDet.PARTY_NAME || pbCustomer.CUST_NAME || pbEnquiry.CUSTOMER_NAME || '';
+    const customerId = bookingDet.CUSTOMER_ID ?? customerDet.CUSTOMER_ID ?? lid.CUSTOMER_ID ?? pbCustomer.CUSTOMER_ID ?? pbEnquiry.CUSTOMER_ID ?? '';
+    const bookPartId = bookingDet.BookPartDetailsList?.[0]?.BOOK_PART_ID ?? bookingDet.BOOK_PART_ID ?? lid.BOOK_PART_ID ?? pbPart0.BOOK_PART_ID ?? 0;
     const amount = Number(bookingAmount);
 
-    // documentIdOverride allows the 2nd voucher call to use BOOKING_NO instead of BOOK_PART_ID
-    const documentId = documentIdOverride || bookPartId;
+    // Ensure documentId is a number (TVS expects numeric DOCUMENT_ID / DOC_NO / DOC_ID)
+    const documentId = Number(documentIdOverride || bookPartId) || 0;
 
-    console.log(`Voucher [${documentIdOverride ? '2nd call - BOOKING_NO' : '1st call - BOOK_PART_ID'}] — documentId: ${documentId}, bookPartId: ${bookPartId}, override: ${documentIdOverride || 'none'}`);
+    console.log(`Voucher [${documentIdOverride ? '2nd call - BOOKING_NO' : '1st call - BOOK_PART_ID'}] — documentId: ${documentId}, bookPartId: ${bookPartId}, override: ${documentIdOverride || 'none'}, customerId: ${customerId}, customerName: ${customerName}`);
 
-    // Use Customer.SL_CODE from SaveBooking response first, then BookingDet.SL_CODE, then API fallback
-    let slCode = customerDet.SL_CODE || bookingDet.SL_CODE || '';
+    let slCode = customerDet.SL_CODE ?? bookingDet.SL_CODE ?? pbCustomer.SL_CODE ?? '';
     if (!slCode) {
       if (!customerId) {
+        console.error('Voucher: CUSTOMER_ID is empty. Sources checked: bookingDet.CUSTOMER_ID=', bookingDet.CUSTOMER_ID, 'customerDet.CUSTOMER_ID=', customerDet.CUSTOMER_ID, 'lid.CUSTOMER_ID=', lid.CUSTOMER_ID, 'pbCustomer.CUSTOMER_ID=', pbCustomer.CUSTOMER_ID, 'pbEnquiry.CUSTOMER_ID=', pbEnquiry.CUSTOMER_ID);
         return res.status(400).json({
           success: false,
-          error: 'CUSTOMER_ID not found in SaveBooking response. Cannot fetch SL_CODE.',
+          error: 'CUSTOMER_ID not found. Cannot fetch SL_CODE.',
         });
       }
 
@@ -2081,27 +2280,33 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       console.warn('GetAccountMapping failed, using branch config defaults:', accMapError.response?.data || accMapError.message);
     }
 
-    // Construct voucher request body
+    // Ensure GL codes and SL code are numbers to match TVS expected types
+    const numGlDebit = Number(glCodeDebit) || 0;
+    const numGlCredit = Number(glCodeCredit) || 0;
+    const numSlCode = Number(slCode) || 0;
+    const numCustomerId = Number(customerId) || 0;
+
+    // Construct voucher request body — all IDs as numbers per TVS reference
     const voucherBody = {
-      DEALER_ID: dealerId,
-      BRANCH_ID: branchIdExt,
+      DEALER_ID: Number(dealerId),
+      BRANCH_ID: Number(branchIdExt),
       VOUCHER_ID: 0,
       VOUCHER_NO: 0,
       CREATED_BY: String(config.CREATED_BY),
       VOUCHER_DT: dateStr,
-      VCHR_TYPE_ID: config.VCHR_TYPE_ID,
+      VCHR_TYPE_ID: Number(config.VCHR_TYPE_ID),
       VCHR_VALUE: amount,
       VCHR_STATUS: 1,
       FIN_YEAR: finYear,
       COMPANY_ID: String(config.COMPANY_ID),
-      PAYMENT_MODE_ID: config.PAYMENT_MODE_ID,
+      PAYMENT_MODE_ID: Number(config.PAYMENT_MODE_ID),
       DOCUMENT_ID: documentId,
       DOC_NO: documentId,
       DOC_TYPE: 1,
       DOC_DATE: dateStr,
       ST_DOC_DATE: dateStr,
       BASE_DOC_TYPE: '6',
-      PARTY_CODE: String(customerId),
+      PARTY_CODE: String(numCustomerId),
       PARTY_NAME: customerName,
       INSTR_NO: null,
       INSTR_DATE: null,
@@ -2121,15 +2326,15 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       ACTIVE: 'true',
       VOUCHER_ACC_DETAILS: [
         {
-          GL_CODE: glCodeDebit,
+          GL_CODE: numGlDebit,
           SL_CODE: '',
           ACC_VALUE: String(amount),
           CREDIT_LIMIT_TYPE: '1',
           IS_DEBIT: true,
         },
         {
-          GL_CODE: glCodeCredit,
-          SL_CODE: slCode,
+          GL_CODE: numGlCredit,
+          SL_CODE: numSlCode,
           ACC_VALUE: String(amount),
           CREDIT_LIMIT_TYPE: '1',
           IS_DEBIT: false,
@@ -2141,16 +2346,16 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
           BRANCH_ID: String(branchIdExt),
           VOUCHER_DATE: isoDate,
           FIN_YEAR: finYear,
-          VOUCHER_SUB_TYPE: config.VCHR_TYPE_ID,
+          VOUCHER_SUB_TYPE: Number(config.VCHR_TYPE_ID),
           PARTY_CAT: '1',
-          PARTY_CODE: String(customerId),
+          PARTY_CODE: String(numCustomerId),
           VOUCHER_STATUS: '1',
           DOC_ID: documentId,
-          payment_mode_id: config.PAYMENT_MODE_ID,
-          VOUCHER_TYPE: config.VCHR_TYPE_ID,
+          payment_mode_id: Number(config.PAYMENT_MODE_ID),
+          VOUCHER_TYPE: Number(config.VCHR_TYPE_ID),
           COMPANY_ID: String(config.COMPANY_ID),
           bank_id: bankId,
-          GL_CODE: glCodeDebit,
+          GL_CODE: numGlDebit,
           Gen_Desc: glDescDebit,
           SL_CODE: '',
           Sub_Desc: '',
@@ -2162,18 +2367,18 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
           BRANCH_ID: String(branchIdExt),
           VOUCHER_DATE: isoDate,
           FIN_YEAR: finYear,
-          VOUCHER_SUB_TYPE: config.VCHR_TYPE_ID,
+          VOUCHER_SUB_TYPE: Number(config.VCHR_TYPE_ID),
           PARTY_CAT: '1',
-          PARTY_CODE: String(customerId),
+          PARTY_CODE: String(numCustomerId),
           VOUCHER_STATUS: '1',
           DOC_ID: documentId,
-          payment_mode_id: config.PAYMENT_MODE_ID,
-          VOUCHER_TYPE: config.VCHR_TYPE_ID,
+          payment_mode_id: Number(config.PAYMENT_MODE_ID),
+          VOUCHER_TYPE: Number(config.VCHR_TYPE_ID),
           COMPANY_ID: String(config.COMPANY_ID),
           bank_id: bankId,
-          GL_CODE: glCodeCredit,
+          GL_CODE: numGlCredit,
           Gen_Desc: glDescCredit,
-          SL_CODE: slCode,
+          SL_CODE: numSlCode,
           Sub_Desc: customerName,
           VCHR_VALUE: String(amount),
           IS_DEBIT: false,

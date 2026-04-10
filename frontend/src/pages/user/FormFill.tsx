@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -109,6 +109,9 @@ export function FormFill() {
   const [bookingAmount, setBookingAmount] = useState('');
   const [performBookingLoading, setPerformBookingLoading] = useState(false);
   const [, setSaveBookingResponse] = useState<any>(null);
+
+  // Already-booked lock: blocks navigation to other tabs
+  const [isEnquiryBooked, setIsEnquiryBooked] = useState(false);
 
   // Cascading vehicle dropdown state
   const [vehicleCatalogOptions, setVehicleCatalogOptions] = useState<{
@@ -309,15 +312,16 @@ export function FormFill() {
             bookingAmount: confirmedAmount,
             lineItemData,
             documentIdOverride: bookingNo,
+            enquiryId: fetchedEnquiryNo!,
           });
           if (v2.data.success) {
             toast({ title: 'All steps complete', description: 'Booking saved and both vouchers submitted successfully.' });
           } else {
-            toast({ title: 'Voucher 2 failed', description: v2.data.error || 'Booking saved but post-booking voucher failed.', variant: 'destructive' });
+            toast({ title: 'Voucher failed — Vehicle may not be in stock', description: v2.data.error || 'Booking was saved but payment voucher failed. Please verify vehicle stock availability.', variant: 'destructive' });
           }
         } catch (v2Err: any) {
           console.error('Voucher 2 error:', v2Err);
-          toast({ title: 'Voucher 2 failed', description: 'Booking saved but post-booking voucher failed. You can retry later.', variant: 'destructive' });
+          toast({ title: 'Voucher failed — Vehicle may not be in stock', description: 'Booking was saved but payment voucher failed. Please verify vehicle stock availability.', variant: 'destructive' });
         }
 
         setBookingSectionUnlocked(true);
@@ -486,12 +490,13 @@ export function FormFill() {
       setFetchedEnquiryNo(String(enquiryNo));
     }
     
-    // Track if this enquiry is already booked (check both Booked flag and STATUS_DESC)
+    // Track if this enquiry is already booked → lock user on tab 0
     const bookedFlag = data['_booked'] ?? rawData?.Booked ?? 0;
     const statusDesc = (data['_status'] || rawData?.STATUS_DESC || '').toLowerCase();
     const _isBooked = bookedFlag === 1 || statusDesc === 'booked';
+    setIsEnquiryBooked(_isBooked);
     if (_isBooked) {
-      setBookingSectionUnlocked(true);
+      toast({ title: 'Enquiry already booked', description: 'This enquiry has an existing booking. Navigation to other tabs is blocked.', variant: 'destructive' });
     }
     
     // Handle ENQUIRY_DESCRIPTION -> map to enquiry dropdown, add dynamically if not existing
@@ -893,6 +898,11 @@ export function FormFill() {
   };
 
   const handleNext = async () => {
+    if (isEnquiryBooked) {
+      toast({ title: 'Navigation blocked', description: 'This enquiry is already booked. Please search for a different enquiry.', variant: 'destructive' });
+      return;
+    }
+
     if (!canEdit) {
       setCurrentTab((prev) => Math.min(prev + 1, flowScreens.length - 1));
       return;
@@ -978,6 +988,11 @@ export function FormFill() {
 
   // Handle direct tab click - only allow if target tab is saved or previous
   const handleTabClick = (tabIndex: number) => {
+    if (isEnquiryBooked && tabIndex !== currentTab) {
+      toast({ title: 'Navigation blocked', description: 'This enquiry is already booked. Please search for a different enquiry.', variant: 'destructive' });
+      return;
+    }
+
     if (!canAccessTab(tabIndex)) {
       toast({ 
         title: 'Please complete and save current tab first', 
@@ -1336,11 +1351,17 @@ export function FormFill() {
         );
     }
 
+    const isBookedStatusField = field.name === 'enquiry_status' && isEnquiryBooked;
+
     return (
-      <div key={field.id} className="space-y-2">
-        <Label className="flex items-center gap-1">
+      <div key={field.id} className={cn(
+        "space-y-2",
+        isBookedStatusField && "rounded-lg border-2 border-red-500 bg-red-50 p-3"
+      )}>
+        <Label className={cn("flex items-center gap-1", isBookedStatusField && "text-red-700 font-semibold")}>
           {field.label}
           {field.isRequired && <span className="text-destructive">*</span>}
+          {isBookedStatusField && <span className="ml-2 text-xs bg-red-600 text-white px-2 py-0.5 rounded-full">BLOCKED</span>}
         </Label>
         {input}
         {error && <p className="text-sm text-destructive">{error}</p>}
@@ -1387,29 +1408,38 @@ export function FormFill() {
           const isPostApproval = isPostApprovalScreen(fs.screen?.code || '');
           const accessible = canAccessTab(index);
 
+          const blockedByBooking = isEnquiryBooked && !isCurrent;
+
           return (
             <button
               key={fs.id}
               onClick={() => handleTabClick(index)}
-              disabled={!accessible}
+              disabled={!accessible || blockedByBooking}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-lg border transition-all whitespace-nowrap',
-                isCurrent && 'bg-primary text-primary-foreground border-primary',
-                !isCurrent && accessible && 'hover:bg-secondary',
-                !accessible && 'opacity-50 cursor-not-allowed',
-                isPostApproval && !isCurrent && !isFullyApproved && 'border-blue-400 bg-blue-50',
-                isPostApproval && !isCurrent && isFullyApproved && 'border-green-400 bg-green-50'
+                isCurrent && !isEnquiryBooked && 'bg-primary text-primary-foreground border-primary',
+                isCurrent && isEnquiryBooked && 'bg-red-600 text-white border-red-600',
+                !isCurrent && !blockedByBooking && accessible && 'hover:bg-secondary',
+                blockedByBooking && 'opacity-40 cursor-not-allowed border-red-300 bg-red-50',
+                !accessible && !blockedByBooking && 'opacity-50 cursor-not-allowed',
+                isPostApproval && !isCurrent && !isFullyApproved && !blockedByBooking && 'border-blue-400 bg-blue-50',
+                isPostApproval && !isCurrent && isFullyApproved && !blockedByBooking && 'border-green-400 bg-green-50'
               )}
-              title={isPostApproval ? (
-                isFullyApproved 
-                  ? 'Ready to print' 
-                  : 'Preview only - Print available after full approval'
-              ) : undefined}
+              title={blockedByBooking
+                ? 'Enquiry already booked — navigation blocked'
+                : isPostApproval ? (
+                  isFullyApproved 
+                    ? 'Ready to print' 
+                    : 'Preview only - Print available after full approval'
+                ) : undefined}
             >
-              {saved && !isCurrent && !isPostApproval && (
+              {blockedByBooking && (
+                <Lock className="h-3.5 w-3.5 text-red-400" />
+              )}
+              {saved && !isCurrent && !isPostApproval && !blockedByBooking && (
                 <Check className="h-4 w-4 text-green-500" />
               )}
-              {isPostApproval && (
+              {isPostApproval && !blockedByBooking && (
                 <span className={cn(
                   'text-xs px-1.5 py-0.5 rounded',
                   !isFullyApproved && 'bg-blue-200 text-blue-800',
@@ -1548,6 +1578,18 @@ export function FormFill() {
             </div>
           )}
         </CardHeader>
+
+        {/* Red banner when enquiry is already booked */}
+        {isEnquiryBooked && currentTab === 0 && (
+          <div className="mx-6 mb-4 rounded-lg border-2 border-red-500 bg-red-50 p-4 flex items-center gap-3">
+            <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
+            <div>
+              <p className="font-semibold text-red-700">This enquiry is already booked</p>
+              <p className="text-sm text-red-600">Navigation to other tabs is blocked. Please search for a different enquiry to continue.</p>
+            </div>
+          </div>
+        )}
+
         <CardContent className="space-y-4 print:space-y-2">
           {currentScreenCode === 'vehicle_details' ? (
             <>
@@ -1605,25 +1647,31 @@ export function FormFill() {
                         return;
                       }
 
-                      const lineItemData = Array.isArray(lineItemResponse.data.data)
-                        ? lineItemResponse.data.data[0]
-                        : lineItemResponse.data.data;
+                      const rawData = lineItemResponse.data.data;
+                      const lineItemData = Array.isArray(rawData)
+                        ? rawData[0]
+                        : rawData;
 
-                      // Pre-fill modal with data from line item response and existing form
-                      const exShrmPrice = lineItemData?.EX_SHRM_PRICE || lineItemData?.UNIT_PRICE || 0;
+                      // requestPartData has pricing from pre-booking cache (reliable fallback)
+                      const rpd = lineItemResponse.data.requestPartData || {};
+
+                      // Use TVS response fields first, fall back to request part data
+                      const unitPrice = lineItemData?.UNIT_PRICE || rpd.UNIT_PRICE || 0;
+                      const exShrmPrice = lineItemData?.EX_SHRM_PRICE || rpd.EX_SHRM_PRICE || unitPrice;
+
                       setBookingConfirmData({
                         lineItemData,
                         brand: vehicleData.brand || lineItemData?.BRAND_NAME || '',
                         model: vehicleData.model || lineItemData?.MODEL_NAME || '',
                         variant: vehicleData.variant || lineItemData?.VARIANT_NAME || '',
-                        quantity: lineItemData?.QTY || 1,
-                        unitPrice: lineItemData?.UNIT_PRICE || 0,
+                        quantity: lineItemData?.BOOKED_QTY || rpd.BOOKED_QTY || 1,
+                        unitPrice,
                         exShowroomPrice: exShrmPrice,
-                        accCharges: lineItemData?.ACC_CHRGS || 0,
-                        discount: lineItemData?.LINE_DISC || 0,
-                        manualDiscount: lineItemData?.MAN_DISC || 0,
-                        regCharges: lineItemData?.REG_CHRGS || 0,
-                        insCharges: lineItemData?.INS_CHARGES || 0,
+                        accCharges: lineItemData?.ACC_CHARGES || rpd.ACC_CHARGES || 0,
+                        discount: lineItemData?.DISC_VALUE || rpd.DISC_VALUE || 0,
+                        manualDiscount: lineItemData?.MANUAL_DISC || rpd.MANUAL_DISC || 0,
+                        regCharges: lineItemData?.REG_CHARGES || rpd.REG_CHARGES || 0,
+                        insCharges: lineItemData?.INS_CHARGES || rpd.INS_CHARGES || 0,
                         bookingAmt: Number(bookingAmount),
                       });
                       setShowBookingConfirm(true);
@@ -1743,9 +1791,18 @@ export function FormFill() {
               </Button>
             )
           ) : (
-            <Button onClick={handleNext} disabled={saveMutation.isPending}>
-              Next
-              <ChevronRight className="h-4 w-4 ml-1" />
+            <Button onClick={handleNext} disabled={saveMutation.isPending || isEnquiryBooked}>
+              {isEnquiryBooked ? (
+                <>
+                  <Lock className="h-4 w-4 mr-1" />
+                  Blocked
+                </>
+              ) : (
+                <>
+                  Next
+                  <ChevronRight className="h-4 w-4 ml-1" />
+                </>
+              )}
             </Button>
           )}
         </div>
@@ -1956,6 +2013,13 @@ export function FormFill() {
                   ).toLocaleString('en-IN')}
                 </span>
               </div>
+
+              {/* Warning when prices are missing */}
+              {bookingConfirmData.unitPrice === 0 && bookingConfirmData.exShowroomPrice === 0 && (
+                <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg border border-red-200">
+                  Unit Price and Ex-Showroom Price are both 0. Please enter valid prices before confirming.
+                </div>
+              )}
             </div>
           )}
 
@@ -1966,7 +2030,7 @@ export function FormFill() {
             <Button
               className="bg-green-600 hover:bg-green-700 gap-2"
               onClick={handleConfirmBooking}
-              disabled={performBookingLoading}
+              disabled={performBookingLoading || (bookingConfirmData?.unitPrice === 0 && bookingConfirmData?.exShowroomPrice === 0)}
             >
               {performBookingLoading ? (
                 <>

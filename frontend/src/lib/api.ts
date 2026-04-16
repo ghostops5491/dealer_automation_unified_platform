@@ -337,6 +337,14 @@ export const externalApi = {
     api.post('/external/save-booking', data),
   submitVoucher: (data: { saveBookingResponse?: any; bookingAmount: number; lineItemData?: any; documentIdOverride?: number; enquiryId?: string }) =>
     api.post('/external/submit-voucher', data),
+  loadVehicleFrames: (data: { enquiryId?: string; partId?: string }) =>
+    api.post('/external/load-vehicle-frames', data),
+  performAllotment: (data: { frameNumber: string; vehicleId: number; noOfDays: number; engineNo?: string; bookingNo?: string; enquiryId?: string }) =>
+    api.post('/external/perform-allotment', data),
+  saveBookingAfterAllotment: (data: { enquiryId: string }) =>
+    api.post('/external/save-booking-after-allotment', data),
+  searchBooking: (data: { contactNo: string; enquiryId?: string }) =>
+    api.post('/external/search-booking', data),
   getCachedEnquiry: (enquiryId: string) =>
     api.get(`/external/enquiry-cache/${enquiryId}`),
   listCachedEnquiries: () =>

@@ -419,7 +419,13 @@ export const saveTabData = async (
       return !!fieldValue && allowedValues.includes(fieldValue);
     };
     
+    // Skip all validation when insurance tab is self-managed
+    const isSelfManagedInsurance =
+      flowScreen.screen.code === 'insurance_nominee_demographics' && data['_selfManaged'];
+
     for (const field of flowScreen.screen.fields) {
+      if (isSelfManagedInsurance) break;
+
       // Skip validation for fields that are not visible due to conditional logic
       if (!isFieldVisible(field)) {
         continue;

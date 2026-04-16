@@ -305,20 +305,55 @@ export const getVariants = async (
       return;
     }
 
-    const variants = await prisma.vehicleCatalog.findMany({
-      where: { 
-        branchId,
-        brand,
-        model,
-      },
-      select: { variant: true },
-      distinct: ['variant'],
+    const rows = await prisma.vehicleCatalog.findMany({
+      where: { branchId, brand, model },
+      select: { variant: true, partId: true, modelId: true },
       orderBy: { variant: 'asc' },
     });
 
+    // Group by variant + modelId so each unique combo appears once
+    const groupKey = (v: { variant: string; modelId: string | null }) =>
+      `${v.variant}|||${v.modelId || ''}`;
+
+    const groups = new Map<string, { variant: string; modelId: string; partIds: string[] }>();
+    for (const row of rows) {
+      const key = groupKey(row);
+      const existing = groups.get(key);
+      if (existing) {
+        if (row.partId && !existing.partIds.includes(row.partId)) {
+          existing.partIds.push(row.partId);
+        }
+      } else {
+        groups.set(key, {
+          variant: row.variant,
+          modelId: row.modelId || '',
+          partIds: row.partId ? [row.partId] : [],
+        });
+      }
+    }
+
+    // Suffix only when the same variant name appears with different modelIds
+    const variantList = Array.from(groups.values());
+    const nameCount: Record<string, number> = {};
+    const totalPerName: Record<string, number> = {};
+    for (const g of variantList) {
+      totalPerName[g.variant] = (totalPerName[g.variant] || 0) + 1;
+    }
+    const labeled = variantList.map((g) => {
+      nameCount[g.variant] = (nameCount[g.variant] || 0) + 1;
+      return { ...g, _occurrence: nameCount[g.variant] };
+    });
+
+    const data = labeled.map((g) => ({
+      variant: g.variant,
+      label: totalPerName[g.variant] > 1 ? `${g.variant} (${g._occurrence})` : g.variant,
+      modelId: g.modelId,
+      partIds: g.partIds,
+    }));
+
     res.json({
       success: true,
-      data: variants.map((v) => v.variant),
+      data,
     });
   } catch (error) {
     console.error('Get variants error:', error);

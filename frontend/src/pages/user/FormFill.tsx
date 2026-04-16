@@ -113,11 +113,22 @@ export function FormFill() {
   // Already-booked lock: blocks navigation to other tabs
   const [isEnquiryBooked, setIsEnquiryBooked] = useState(false);
 
+  // Chassis frame dropdown (loaded from TVS after booking)
+  const [chassisOptions, setChassisOptions] = useState<{ value: string; label: string; engineNo: string; keyNo: string; batteryNo: string; vehicleId: number; noOfDays: number; color: string }[]>([]);
+  const [chassisLoading, setChassisLoading] = useState(false);
+  const [allotmentLoading, setAllotmentLoading] = useState(false);
+  // const [saveBookingAfterAllotLoading, setSaveBookingAfterAllotLoading] = useState(false); // hidden for now
+  const [searchBookingLoading, setSearchBookingLoading] = useState(false);
+  const [selfManagedInsurance, setSelfManagedInsurance] = useState(false);
+
+  // Part ID visibility toggle (like Model ID)
+  const [showPartId, setShowPartId] = useState(false);
+
   // Cascading vehicle dropdown state
   const [vehicleCatalogOptions, setVehicleCatalogOptions] = useState<{
     brands: string[];
     models: string[];
-    variants: string[];
+    variants: { value: string; label: string; modelId: string; partIds: string[]; originalVariant: string }[];
   }>({
     brands: [],
     models: [],
@@ -326,14 +337,24 @@ export function FormFill() {
 
         setBookingSectionUnlocked(true);
         setBookingAmount(String(confirmedAmount));
+
+        const partDetails = bd.BookPartDetailsList?.[0] || {};
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          booking_amount: confirmedAmount,
+          booking_no: bookingNo || partDetails.BOOK_PART_ID || lineItemData?.BOOK_PART_ID || '',
+          _bookPartId: partDetails.BOOK_PART_ID || lineItemData?.BOOK_PART_ID || '',
+          _vehicleId: partDetails.VEHICLE_ID || 0,
+          _customerId: bd.CUSTOMER_ID || 0,
+          _partId: partDetails.PART_ID || lineItemData?.PART_ID || '',
+          _modelId: partDetails.MODEL_ID || lineItemData?.MODEL_ID || '',
+          _bookingDone: true,
+        };
         setFormData((prev: Record<string, any>) => ({
           ...prev,
-          vehicle_details: {
-            ...prev['vehicle_details'],
-            booking_amount: confirmedAmount,
-            booking_no: bookingNo || bd.BookPartDetailsList?.[0]?.BOOK_PART_ID || lineItemData?.BOOK_PART_ID || '',
-          },
+          vehicle_details: updatedVehicleDetails,
         }));
+        await autoSaveVehicleDetails(updatedVehicleDetails);
       } else {
         toast({ title: 'Booking failed', description: saveResponse.data.error || 'Failed to save booking.', variant: 'destructive' });
       }
@@ -409,6 +430,14 @@ export function FormFill() {
         
         console.log('Pre-booking updated formData:', JSON.stringify(newFormData, null, 2));
         setFormData(newFormData);
+
+        // Persist vehicle_details and amounts_tax to DB so they survive refresh
+        if (newFormData['vehicle_details']) {
+          await autoSaveVehicleDetails(newFormData['vehicle_details']);
+        }
+        if (newFormData['amounts_tax']) {
+          await autoSaveTab('amounts_tax', newFormData['amounts_tax']);
+        }
         
         // Auto-fetch model parts if MODEL_ID is available to populate VehicleCatalog
         const extractedModelId = newFormData['vehicle_details']?.model_id;
@@ -416,12 +445,18 @@ export function FormFill() {
           handleFetchModelParts(extractedModelId);
         }
         
-        // Store CGST/SGST metadata for cross-check validation
+        // Store CGST/SGST metadata for cross-check validation (also persisted inside amounts_tax)
         if (mapped['_cgst_perc'] !== undefined) {
           setCgstMeta({ perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] });
+          if (newFormData['amounts_tax']) {
+            newFormData['amounts_tax']._cgstMeta = { perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] };
+          }
         }
         if (mapped['_sgst_perc'] !== undefined) {
           setSgstMeta({ perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] });
+          if (newFormData['amounts_tax']) {
+            newFormData['amounts_tax']._sgstMeta = { perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] };
+          }
         }
         
         setPreBookingDone(true);
@@ -563,6 +598,23 @@ export function FormFill() {
       if (savedEnquiryNo && !fetchedEnquiryNo) {
         setFetchedEnquiryNo(String(savedEnquiryNo));
       }
+      // Restore booked-enquiry lock from saved enquiry_status
+      const savedStatus = (sub.formData?.customer_enquiry?.enquiry_status || '').toLowerCase();
+      if (savedStatus === 'booked') {
+        setIsEnquiryBooked(true);
+      }
+      // Restore self-managed insurance flag
+      if (sub.formData?.insurance_nominee_demographics?._selfManaged) {
+        setSelfManagedInsurance(true);
+      }
+      // Restore CGST/SGST cross-check metadata from persisted amounts_tax
+      const savedAmounts = sub.formData?.amounts_tax;
+      if (savedAmounts?._cgstMeta) {
+        setCgstMeta(savedAmounts._cgstMeta);
+      }
+      if (savedAmounts?._sgstMeta) {
+        setSgstMeta(savedAmounts._sgstMeta);
+      }
       setCurrentTab(sub.currentTabIndex || 0);
       setIsInitialLoad(false);
     }
@@ -590,7 +642,21 @@ export function FormFill() {
         setVehicleCatalogOptions(prev => ({ ...prev, models: response.data.data || [] }));
       } else if (fieldName === 'variant' && brand && model) {
         const response = await vehicleCatalogApi.getVariants(brand, model);
-        setVehicleCatalogOptions(prev => ({ ...prev, variants: response.data.data || [] }));
+        const rawVariants = response.data.data || [];
+        // Backend returns deduplicated objects { variant, label, modelId, partIds[] }
+        // Use composite key (modelId|||variant) as value to guarantee uniqueness
+        const mapped = rawVariants.map((v: any) =>
+          typeof v === 'string'
+            ? { value: v, label: v, modelId: '', partIds: [] as string[], originalVariant: v }
+            : {
+                value: `${v.modelId || ''}|||${v.variant || ''}`,
+                label: v.label || v.variant,
+                modelId: v.modelId || '',
+                partIds: v.partIds || (v.partId ? [v.partId] : []),
+                originalVariant: v.variant || '',
+              }
+        );
+        setVehicleCatalogOptions(prev => ({ ...prev, variants: mapped }));
       }
     } catch (error) {
       console.error(`Failed to load ${fieldName} options:`, error);
@@ -624,17 +690,228 @@ export function FormFill() {
     }
   }, [currentTab, flowScreens.length]);
 
-  // Auto-unlock post-booking section if data already exists (returning to saved form)
+  // Auto-unlock post-booking section & restore allotment state if data already exists (returning to saved form)
   useEffect(() => {
     const screenCode = flowScreens[currentTab]?.screen?.code;
     if (screenCode === 'vehicle_details') {
       const vehicleData = formData['vehicle_details'] || {};
-      if (vehicleData.booking_amount || vehicleData.booking_no || vehicleData.chassis_no) {
+      if (vehicleData.booking_no) {
         setBookingSectionUnlocked(true);
-        if (vehicleData.booking_amount) setBookingAmount(vehicleData.booking_amount);
+        if (vehicleData.booking_amount) setBookingAmount(String(vehicleData.booking_amount));
+      }
+      if (vehicleData._bookingDone) {
+        setBookingSectionUnlocked(true);
+      }
+      if (vehicleData._allotmentDone) {
+        setPreBookingDone(true);
       }
     }
   }, [currentTab, flowScreens.length]);
+
+  // Fetch chassis frames (vehicle frames) for allotment dropdown — triggered by button
+  const handleFetchChassis = async () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
+      return;
+    }
+    setChassisLoading(true);
+    try {
+      const vehicleData = formData['vehicle_details'] || {};
+      const resp = await externalApi.loadVehicleFrames({
+        enquiryId: fetchedEnquiryNo,
+        partId: vehicleData._partId || vehicleData._variantPartId || undefined,
+      });
+      if (resp.data.success && resp.data.data?.length > 0) {
+        setChassisOptions(resp.data.data.map((f: any) => ({
+              value: f.value || '',
+              label: f.label || f.value || '',
+              engineNo: f.engineNo || '',
+              keyNo: f.keyNo || '',
+              batteryNo: f.batteryNo || '',
+              vehicleId: f.vehicleId || 0,
+              noOfDays: f.noOfDays || 0,
+              color: f.description || '',
+            })));
+        toast({ title: `${resp.data.count} chassis number(s) available`, description: `${resp.data.availableQty || resp.data.count} vehicles in stock. Select from dropdown.` });
+      } else {
+        toast({ title: 'No chassis numbers available', description: 'No vehicle frames found for allotment.', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      console.error('Failed to load chassis frames:', err);
+      toast({ title: 'Chassis load failed', description: err.response?.data?.error || 'Could not fetch chassis numbers.', variant: 'destructive' });
+    } finally {
+      setChassisLoading(false);
+    }
+  };
+
+  // Perform vehicle allotment using selected chassis frame data
+  const handlePerformAllotment = async () => {
+    const vehicleData = formData['vehicle_details'] || {};
+    const selectedChassis = vehicleData.chassis_no;
+
+    console.log('Allotment: chassis_no from formData =', selectedChassis);
+    console.log('Allotment: chassisOptions count =', chassisOptions.length);
+    console.log('Allotment: chassisOptions values =', chassisOptions.map(f => f.value));
+
+    if (!selectedChassis) {
+      toast({ title: 'No chassis selected', description: 'Please select a chassis number first.', variant: 'destructive' });
+      return;
+    }
+
+    const selectedFrame = chassisOptions.find(f => f.value === selectedChassis);
+    console.log('Allotment: matched frame =', selectedFrame ? { value: selectedFrame.value, vehicleId: selectedFrame.vehicleId, noOfDays: selectedFrame.noOfDays } : 'NOT FOUND');
+
+    if (!selectedFrame) {
+      toast({ title: 'Chassis data not found', description: `Chassis "${selectedChassis}" not in loaded options. Please re-fetch and select again.`, variant: 'destructive' });
+      return;
+    }
+
+    setAllotmentLoading(true);
+    try {
+      const vehicleDetailsData = formData['vehicle_details'] || {};
+      const resp = await externalApi.performAllotment({
+        frameNumber: selectedFrame.value,
+        vehicleId: selectedFrame.vehicleId,
+        noOfDays: selectedFrame.noOfDays,
+        engineNo: selectedFrame.engineNo,
+        bookingNo: vehicleDetailsData.booking_no || '',
+        enquiryId: fetchedEnquiryNo || undefined,
+      });
+
+      if (resp.data.success) {
+        toast({ title: 'Allotment successful', description: resp.data.message || 'Vehicle allotment completed.' });
+
+        const allotData = resp.data.data || {};
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          _allotmentDone: true,
+          _frameNumber: selectedFrame.value,
+          _engineNo: selectedFrame.engineNo,
+          _vehicleId: selectedFrame.vehicleId,
+          _allotVehId: allotData.ALLOT_VEH_ID || allotData.AllotmentId || 0,
+          chassis_no: selectedFrame.value,
+          engine_no: selectedFrame.engineNo,
+          key_no: selectedFrame.keyNo || '',
+          battery_no: selectedFrame.batteryNo || '',
+        };
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: updatedVehicleDetails,
+        }));
+        await autoSaveVehicleDetails(updatedVehicleDetails);
+      } else {
+        toast({ title: 'Allotment failed', description: resp.data.error || 'Could not perform allotment.', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      console.error('Allotment error:', err);
+      toast({ title: 'Allotment failed', description: err.response?.data?.error || 'Could not perform allotment.', variant: 'destructive' });
+    } finally {
+      setAllotmentLoading(false);
+    }
+  };
+
+  /* Save booking after allotment — hidden for now, kept for future use
+  const handleSaveBookingAfterAllotment = async () => {
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry', description: 'No enquiry number available.', variant: 'destructive' });
+      return;
+    }
+    setSaveBookingAfterAllotLoading(true);
+    try {
+      const resp = await externalApi.saveBookingAfterAllotment({ enquiryId: fetchedEnquiryNo });
+      if (resp.data.success) {
+        toast({ title: 'Booking saved', description: resp.data.message || 'Booking saved after allotment successfully.' });
+
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          _postAllotmentSaved: true,
+        };
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: updatedVehicleDetails,
+        }));
+        await autoSaveVehicleDetails(updatedVehicleDetails);
+      } else {
+        toast({ title: 'Save booking failed', description: resp.data.error || 'Could not save booking.', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      console.error('Save booking after allotment error:', err);
+      toast({ title: 'Save booking failed', description: err.response?.data?.error || 'Could not save booking after allotment.', variant: 'destructive' });
+    } finally {
+      setSaveBookingAfterAllotLoading(false);
+    }
+  };
+  */
+
+  // Fetch booked details by phone number (SearchBooking) and populate Tab 3 fields
+  const handleSearchBooking = async () => {
+    const customerData = formData['customer_enquiry'] || {};
+    const phoneNo = customerData.mobile_no || '';
+    if (!phoneNo) {
+      toast({ title: 'No phone number', description: 'Fetch enquiry details on Tab 1 first to get the customer phone number.', variant: 'destructive' });
+      return;
+    }
+    setSearchBookingLoading(true);
+    try {
+      const resp = await externalApi.searchBooking({
+        contactNo: phoneNo,
+        enquiryId: fetchedEnquiryNo || undefined,
+      });
+      if (resp.data.success && resp.data.data) {
+        const d = resp.data.data;
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          booking_no: d.bookingNo || d.bookingId || '',
+          customer_id: d.customerId || '',
+          _bookingDone: true,
+          _customerId: d.customerId || 0,
+          _searchBookingData: d.raw || {},
+        };
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: updatedVehicleDetails,
+        }));
+        setBookingSectionUnlocked(true);
+        if (!fetchedEnquiryNo && d.enquiryNo) {
+          setFetchedEnquiryNo(String(d.enquiryNo));
+        }
+        await autoSaveVehicleDetails(updatedVehicleDetails);
+        toast({
+          title: 'Booked details fetched',
+          description: resp.data.message || `Booking #${d.bookingNo} — ${d.customerName} — ${d.statusDesc}`,
+        });
+      } else {
+        toast({ title: 'No bookings found', description: resp.data.message || 'No bookings found for this phone number.', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      console.error('SearchBooking error:', err);
+      toast({ title: 'Fetch failed', description: err.response?.data?.error || 'Could not search bookings.', variant: 'destructive' });
+    } finally {
+      setSearchBookingLoading(false);
+    }
+  };
+
+  // Auto-save any tab to DB without validation (used after API operations)
+  const autoSaveTab = async (screenCode: string, dataOverride?: Record<string, any>) => {
+    if (!submission) return;
+    const tabIndex = flowScreens.findIndex(
+      (fs: FlowScreen) => fs.screen?.code === screenCode
+    );
+    if (tabIndex === -1) return;
+    try {
+      await saveMutation.mutateAsync({
+        id: submission.id,
+        tabIndex,
+        data: dataOverride || formData[screenCode] || {},
+        screenCode,
+      });
+    } catch (e) {
+      console.warn(`Auto-save ${screenCode} failed:`, e);
+    }
+  };
+
+  const autoSaveVehicleDetails = async (dataOverride?: Record<string, any>) =>
+    autoSaveTab('vehicle_details', dataOverride);
 
   const isViewer = user?.role === 'VIEWER';
   const isInsuranceExecutive = user?.role === 'INSURANCE_EXECUTIVE';
@@ -666,6 +943,9 @@ export function FormFill() {
       'customer_name': `${customerData.first_name || ''} ${customerData.last_name || ''}`.trim(),
       'customer_mobile': customerData.mobile_no || '',
       'customer_address': addressData.address || '',
+      'customer_gender': customerData.gender ? customerData.gender.charAt(0).toUpperCase() + customerData.gender.slice(1) : '',
+      'customer_marital_status': customerData.marital_status ? customerData.marital_status.charAt(0).toUpperCase() + customerData.marital_status.slice(1) : '',
+      'customer_language': customerData.language ? customerData.language.charAt(0).toUpperCase() + customerData.language.slice(1) : '',
       
       // Invoice/Gate Pass - Vehicle details
       'vehicle_brand': vehicleData.brand || '',
@@ -799,9 +1079,17 @@ export function FormFill() {
       // Reset dependent options
       if (fieldName === 'brand') {
         setVehicleCatalogOptions(prev => ({ ...prev, models: [], variants: [] }));
+        setFormData(prev => ({
+          ...prev,
+          vehicle_details: { ...prev['vehicle_details'], _variantPartId: '', _variantModelId: '', _variantName: '' },
+        }));
         if (value) loadCascadingOptions('model', { brand: value });
       } else if (fieldName === 'model') {
         setVehicleCatalogOptions(prev => ({ ...prev, variants: [] }));
+        setFormData(prev => ({
+          ...prev,
+          vehicle_details: { ...prev['vehicle_details'], _variantPartId: '', _variantModelId: '', _variantName: '' },
+        }));
         const vehicleData = formData['vehicle_details'] || {};
         if (value) loadCascadingOptions('variant', { ...vehicleData, model: value });
       }
@@ -826,6 +1114,12 @@ export function FormFill() {
   };
 
   const validateCurrentTab = () => {
+    // Skip all validation on insurance tab when self-managed
+    if (currentScreenCode === 'insurance_nominee_demographics' && selfManagedInsurance) {
+      setErrors({});
+      return true;
+    }
+
     const newErrors: Record<string, string> = {};
     
     for (const field of currentFields) {
@@ -851,13 +1145,14 @@ export function FormFill() {
         }
       }
       
-      // Check for past date validation (booking_date should not allow past dates)
+      // booking_date: allow up to 2 months in the past
       if (field.fieldType === 'DATE' && field.name === 'booking_date' && value) {
         const selectedDate = new Date(value);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        if (selectedDate < today) {
-          newErrors[field.name] = field.validationMessage || 'Date cannot be in the past';
+        const twoMonthsAgo = new Date();
+        twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+        twoMonthsAgo.setHours(0, 0, 0, 0);
+        if (selectedDate < twoMonthsAgo) {
+          newErrors[field.name] = field.validationMessage || 'Date cannot be more than 2 months in the past';
         }
       }
     }
@@ -1150,7 +1445,51 @@ export function FormFill() {
 
     let input;
 
-    switch (field.fieldType) {
+    // Chassis No — always render as dropdown on vehicle_details, regardless of stored fieldType
+    if (field.name === 'chassis_no' && currentScreenCode === 'vehicle_details') {
+      const frameOptions = chassisOptions.length > 0
+        ? chassisOptions.map(f => ({ value: f.value, label: f.label }))
+        : parseOptions(field.options);
+      input = (
+        <div className="relative">
+          <Select
+            value={value}
+            onValueChange={(v: string) => {
+              const selected = chassisOptions.find(f => f.value === v);
+              setFormData((prev: Record<string, any>) => ({
+                ...prev,
+                vehicle_details: {
+                  ...prev['vehicle_details'],
+                  chassis_no: v,
+                  ...(selected?.engineNo ? { engine_no: selected.engineNo } : {}),
+                  ...(selected?.keyNo ? { key_no: selected.keyNo } : {}),
+                  ...(selected?.batteryNo ? { battery_no: selected.batteryNo } : {}),
+                },
+              }));
+            }}
+            disabled={!editable || chassisLoading}
+          >
+            <SelectTrigger className={cn(error && 'border-destructive', chassisLoading && 'pr-10')}>
+              <SelectValue placeholder={
+                chassisLoading ? 'Loading chassis numbers...' :
+                chassisOptions.length === 0 ? 'Complete booking to load chassis' :
+                'Select chassis number'
+              } />
+            </SelectTrigger>
+            <SelectContent>
+              {frameOptions.map((opt: { value: string; label: string }) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {chassisLoading && (
+            <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+          )}
+        </div>
+      );
+    } else switch (field.fieldType) {
       case 'TEXTAREA':
         input = (
           <Textarea
@@ -1184,61 +1523,170 @@ export function FormFill() {
           );
         } else if (currentScreenCode === 'vehicle_details' && CASCADING_VEHICLE_FIELDS.includes(field.name)) {
           // Use cascading vehicle catalog options
-          let cascadingOptions: string[] = [];
+          let cascadingStringOptions: string[] = [];
           let isLoading = false;
           let isDisabled = !editable;
           const vehicleData = formData['vehicle_details'] || {};
           
           switch (field.name) {
             case 'brand':
-              cascadingOptions = vehicleCatalogOptions.brands;
+              cascadingStringOptions = vehicleCatalogOptions.brands;
               isLoading = catalogLoading['brand'] || false;
               break;
             case 'model':
-              cascadingOptions = vehicleCatalogOptions.models;
+              cascadingStringOptions = vehicleCatalogOptions.models;
               isLoading = catalogLoading['model'] || false;
               isDisabled = isDisabled || !vehicleData.brand;
               break;
             case 'variant':
-              cascadingOptions = vehicleCatalogOptions.variants;
               isLoading = catalogLoading['variant'] || false;
               isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model;
               break;
           }
           
-          // If no catalog options available, fall back to static options
-          const finalOptions = cascadingOptions.length > 0 
-            ? cascadingOptions.map(opt => ({ value: opt, label: opt }))
-            : options;
-          
-          input = (
-            <div className="relative">
-              <Select
-                value={value}
-                onValueChange={(v) => setFieldValue(field.name, v)}
-                disabled={isDisabled || isLoading}
-              >
-                <SelectTrigger className={cn(error && 'border-destructive', isLoading && 'pr-10')}>
-                  <SelectValue placeholder={
-                    isLoading ? 'Loading...' : 
-                    isDisabled && !editable ? 'Select...' :
-                    isDisabled ? `Select ${VEHICLE_FIELD_DEPENDENCIES[field.name]?.slice(-1)[0] || ''} first` :
-                    field.placeholder || 'Select...'
-                  } />
-                </SelectTrigger>
-                <SelectContent>
-                  {finalOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {isLoading && (
-                <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-              )}
-            </div>
-          );
+          if (field.name === 'variant') {
+            const variantOpts = vehicleCatalogOptions.variants;
+            // Build composite key from saved modelId + variant name for matching
+            const storedComposite = vehicleData._variantModelId
+              ? `${vehicleData._variantModelId}|||${vehicleData._variantName || vehicleData.variant || ''}`
+              : '';
+            const selectValue = storedComposite || value || '';
+
+            const finalVariantOptions = variantOpts.length > 0
+              ? variantOpts.map(v => ({ value: v.value, label: v.label }))
+              : options;
+
+            const selectedVariant = variantOpts.find(v => v.value === selectValue) || variantOpts.find(v => v.label === value);
+            const displayLabel = selectedVariant?.label || value || '';
+
+            const selectedPartIds = selectedVariant?.partIds || [];
+            const currentPartId = vehicleData._variantPartId || '';
+
+            input = (
+              <div className="space-y-2">
+                <div className="relative">
+                  <Select
+                    value={selectValue}
+                    onValueChange={(v) => {
+                      const chosen = variantOpts.find(opt => opt.value === v);
+                      const partIds = chosen?.partIds || [];
+                      setFormData(prev => ({
+                        ...prev,
+                        vehicle_details: {
+                          ...prev['vehicle_details'],
+                          variant: chosen?.label || v,
+                          _variantModelId: chosen?.modelId || '',
+                          _variantName: chosen?.originalVariant || '',
+                          _variantPartId: partIds.length === 1 ? partIds[0] : '',
+                        },
+                      }));
+                    }}
+                    disabled={isDisabled || isLoading}
+                  >
+                    <SelectTrigger className={cn(error && 'border-destructive', isLoading && 'pr-10')}>
+                      <SelectValue placeholder={
+                        isLoading ? 'Loading...' :
+                        isDisabled && !editable ? 'Select...' :
+                        isDisabled ? `Select ${VEHICLE_FIELD_DEPENDENCIES[field.name]?.slice(-1)[0] || ''} first` :
+                        field.placeholder || 'Select...'
+                      }>
+                        {displayLabel}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {finalVariantOptions.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {isLoading && (
+                    <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+                {/* Part ID — hidden by default, toggle like Model ID */}
+                {selectedPartIds.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs text-muted-foreground">Part ID</Label>
+                    <button
+                      type="button"
+                      onClick={() => setShowPartId(!showPartId)}
+                      className="p-1 rounded hover:bg-secondary transition-colors"
+                      title={showPartId ? 'Hide Part ID' : 'Show Part ID'}
+                    >
+                      {showPartId ? <EyeOff className="h-3.5 w-3.5 text-muted-foreground" /> : <Eye className="h-3.5 w-3.5 text-muted-foreground" />}
+                    </button>
+                    {showPartId && (
+                      selectedPartIds.length === 1 ? (
+                        <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">{selectedPartIds[0]}</span>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          {selectedPartIds.map((pid: string) => (
+                            <button
+                              key={pid}
+                              type="button"
+                              onClick={() => {
+                                setFormData(prev => ({
+                                  ...prev,
+                                  vehicle_details: {
+                                    ...prev['vehicle_details'],
+                                    _variantPartId: pid,
+                                  },
+                                }));
+                              }}
+                              className={cn(
+                                'text-xs font-mono px-2 py-0.5 rounded border transition-colors',
+                                currentPartId === pid
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'bg-muted hover:bg-accent border-transparent'
+                              )}
+                            >
+                              {pid}
+                            </button>
+                          ))}
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          } else {
+            // Brand and model — simple string options
+            const finalOptions = cascadingStringOptions.length > 0 
+              ? cascadingStringOptions.map(opt => ({ value: opt, label: opt }))
+              : options;
+            
+            input = (
+              <div className="relative">
+                <Select
+                  value={value}
+                  onValueChange={(v) => setFieldValue(field.name, v)}
+                  disabled={isDisabled || isLoading}
+                >
+                  <SelectTrigger className={cn(error && 'border-destructive', isLoading && 'pr-10')}>
+                    <SelectValue placeholder={
+                      isLoading ? 'Loading...' : 
+                      isDisabled && !editable ? 'Select...' :
+                      isDisabled ? `Select ${VEHICLE_FIELD_DEPENDENCIES[field.name]?.slice(-1)[0] || ''} first` :
+                      field.placeholder || 'Select...'
+                    } />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {finalOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {isLoading && (
+                  <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+              </div>
+            );
+          }
         } else {
           // Merge dynamic enquiry options for the 'enquiry' field
           const mergedOptions = field.name === 'enquiry' && currentScreenCode === 'customer_enquiry'
@@ -1277,14 +1725,15 @@ export function FormFill() {
         break;
 
       case 'DATE':
-        // For booking_date or similar fields, set min to today to prevent past dates
-        const today = new Date().toISOString().split('T')[0];
+        const twoMonthsAgo = new Date();
+        twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+        const minDate = twoMonthsAgo.toISOString().split('T')[0];
         input = (
           <Input
             type="date"
             value={value}
             onChange={(e) => setFieldValue(field.name, e.target.value)}
-            min={field.name === 'booking_date' ? today : undefined}
+            min={field.name === 'booking_date' ? minDate : undefined}
             {...commonProps}
           />
         );
@@ -1536,6 +1985,42 @@ export function FormFill() {
                 </Button>
               </div>
             )}
+            {/* Self Managed checkbox - on insurance_nominee_demographics screen */}
+            {currentScreenCode === 'insurance_nominee_demographics' && (
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="self-managed-insurance"
+                  checked={selfManagedInsurance}
+                  onCheckedChange={(checked: boolean) => {
+                    setSelfManagedInsurance(!!checked);
+                    // Persist in form data so it survives save/reload
+                    setFormData(prev => ({
+                      ...prev,
+                      insurance_nominee_demographics: {
+                        ...prev['insurance_nominee_demographics'],
+                        _selfManaged: !!checked,
+                      },
+                    }));
+                  }}
+                />
+                <Label htmlFor="self-managed-insurance" className="text-sm font-medium cursor-pointer select-none">
+                  Self Managed
+                </Label>
+              </div>
+            )}
+            {/* Generate Invoice button - on invoice screen */}
+            {currentScreenCode === 'invoice' && (
+              <Button
+                variant="outline"
+                className="gap-2 border-orange-400 text-orange-700 hover:bg-orange-50"
+                onClick={() => {
+                  toast({ title: 'Invoice not generated', description: 'Invoice generation API is not linked yet.', variant: 'destructive' });
+                }}
+              >
+                <Play className="h-4 w-4" />
+                Generate Invoice
+              </Button>
+            )}
             {/* Fetch Pre Booking, Pre Fetch & Perform Booking - on vehicle_details screen */}
             {currentScreenCode === 'vehicle_details' && fetchedEnquiryNo && (
               <div className="flex gap-2">
@@ -1591,7 +2076,18 @@ export function FormFill() {
         )}
 
         <CardContent className="space-y-4 print:space-y-2">
-          {currentScreenCode === 'vehicle_details' ? (
+          {/* Self Managed overlay — blocks all insurance fields */}
+          {currentScreenCode === 'insurance_nominee_demographics' && selfManagedInsurance && (
+            <div className="relative rounded-lg border-2 border-dashed border-amber-300 bg-amber-50/80 p-8 flex flex-col items-center justify-center gap-3">
+              <Lock className="h-8 w-8 text-amber-500" />
+              <p className="text-amber-700 font-semibold text-lg">Self Managed</p>
+              <p className="text-amber-600 text-sm text-center max-w-md">
+                Insurance, nominee, and demographics details are self-managed by the customer.
+                No data entry is required. Click Next to continue.
+              </p>
+            </div>
+          )}
+          {currentScreenCode === 'insurance_nominee_demographics' && selfManagedInsurance ? null : currentScreenCode === 'vehicle_details' ? (
             <>
               {/* Pre-booking fields (brand, model, variant, fuel_type, etc.) */}
               {currentFields
@@ -1636,6 +2132,7 @@ export function FormFill() {
                       toast({ title: 'Setting line item...', description: 'Configuring vehicle details on the booking.' });
                       const lineItemResponse = await externalApi.setBookingLineItem({
                         enquiryId: fetchedEnquiryNo!,
+                        partId: vehicleData._variantPartId || undefined,
                         brand: vehicleData.brand,
                         model: vehicleData.model,
                         variant: vehicleData.variant,
@@ -1709,8 +2206,9 @@ export function FormFill() {
                 </Button>
               </div>
 
-              {/* Post-booking fields — with overlay if not unlocked */}
+              {/* Post-booking fields — overlay temporarily disabled for testing */}
               <div className="relative">
+                {/* TODO: Re-enable overlay after testing
                 {!bookingSectionUnlocked && (
                   <div className="absolute inset-0 z-10 bg-gray-100/70 backdrop-blur-[1px] rounded-lg flex items-center justify-center cursor-not-allowed">
                     <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm border text-sm text-gray-500">
@@ -1719,11 +2217,129 @@ export function FormFill() {
                     </div>
                   </div>
                 )}
-                <div className={cn("space-y-4", !bookingSectionUnlocked && "pointer-events-none select-none")}>
+                */}
+                <div className={cn("space-y-4")}>
+                  {/* Fetch Booked Details — loads booking info by phone number */}
+                  <div className="flex items-center gap-3 p-3 rounded-lg border bg-amber-50/50">
+                    <Button
+                      onClick={handleSearchBooking}
+                      disabled={searchBookingLoading || !(formData['customer_enquiry']?.mobile_no)}
+                      variant="outline"
+                      className="gap-2 border-amber-500 text-amber-700 hover:bg-amber-50"
+                    >
+                      {searchBookingLoading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Searching...
+                        </>
+                      ) : (
+                        <>
+                          <Search className="h-4 w-4" />
+                          Fetch Booked Details
+                        </>
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {formData['customer_enquiry']?.mobile_no
+                        ? `Search bookings for ${formData['customer_enquiry'].mobile_no}`
+                        : 'Fetch enquiry details on Tab 1 first'}
+                    </span>
+                  </div>
+
+                  {/* Fetch Chassis button — loads FRAME_NO dropdown from TVS */}
+                  <div className="flex items-center gap-3 p-3 rounded-lg border bg-blue-50/50">
+                    <Button
+                      onClick={handleFetchChassis}
+                      disabled={chassisLoading || !fetchedEnquiryNo}
+                      variant="outline"
+                      className={cn(
+                        "gap-2",
+                        chassisOptions.length > 0
+                          ? "border-green-500 text-green-700 hover:bg-green-50"
+                          : "border-blue-500 text-blue-700 hover:bg-blue-50"
+                      )}
+                    >
+                      {chassisLoading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading...
+                        </>
+                      ) : chassisOptions.length > 0 ? (
+                        <>
+                          <RefreshCw className="h-4 w-4" />
+                          Refresh Chassis ({chassisOptions.length})
+                        </>
+                      ) : (
+                        <>
+                          <Search className="h-4 w-4" />
+                          Fetch Chassis
+                        </>
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {chassisOptions.length > 0
+                        ? `${chassisOptions.length} chassis number(s) loaded — select from dropdown below`
+                        : 'Click to load available chassis numbers for allotment'}
+                    </span>
+                  </div>
+
                   {currentFields
                     .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
                     .filter((field: ScreenField) => POST_BOOKING_FIELDS.includes(field.name))
                     .map((field: ScreenField) => renderField(field))}
+
+                  {/* Perform Allotment button — below RTO State */}
+                  <div className="flex items-center gap-3 p-3 rounded-lg border bg-purple-50/50 mt-2">
+                    <Button
+                      onClick={handlePerformAllotment}
+                      disabled={allotmentLoading || !(formData['vehicle_details']?.chassis_no) || chassisOptions.length === 0}
+                      variant="outline"
+                      className="gap-2 border-purple-500 text-purple-700 hover:bg-purple-50"
+                    >
+                      {allotmentLoading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Processing...
+                        </>
+                      ) : (
+                        <>
+                          <Check className="h-4 w-4" />
+                          Perform Allotment
+                        </>
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {formData['vehicle_details']?.chassis_no
+                        ? `Allot vehicle with chassis: ${formData['vehicle_details'].chassis_no}`
+                        : 'Select a chassis number first to perform allotment'}
+                    </span>
+                  </div>
+
+                  {/* Save Booking button — hidden for now
+                  <div className="flex items-center gap-3 p-3 rounded-lg border bg-green-50/50 mt-2">
+                    <Button
+                      onClick={handleSaveBookingAfterAllotment}
+                      disabled={saveBookingAfterAllotLoading || !fetchedEnquiryNo}
+                      variant="outline"
+                      className="gap-2 border-green-600 text-green-700 hover:bg-green-50"
+                    >
+                      {saveBookingAfterAllotLoading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        <>
+                          <Check className="h-4 w-4" />
+                          Save Booking
+                        </>
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      Save booking with allotment details
+                    </span>
+                  </div>
+                  */}
                 </div>
               </div>
             </>

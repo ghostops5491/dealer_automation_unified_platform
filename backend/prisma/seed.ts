@@ -342,10 +342,52 @@ async function main() {
         validationMessage: 'Executive name must contain only letters',
         sortOrder: 16,
       },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'gender',
+        label: 'Gender',
+        fieldType: 'SELECT',
+        isRequired: false,
+        options: JSON.stringify([
+          { value: 'male', label: 'Male' },
+          { value: 'female', label: 'Female' },
+          { value: 'other', label: 'Other' },
+        ]),
+        sortOrder: 17,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'marital_status',
+        label: 'Marital Status',
+        fieldType: 'SELECT',
+        isRequired: false,
+        options: JSON.stringify([
+          { value: 'single', label: 'Single' },
+          { value: 'married', label: 'Married' },
+          { value: 'divorced', label: 'Divorced' },
+          { value: 'widowed', label: 'Widowed' },
+        ]),
+        sortOrder: 18,
+      },
+      {
+        screenId: customerEnquiryScreen.id,
+        name: 'language',
+        label: 'Language',
+        fieldType: 'SELECT',
+        isRequired: false,
+        options: JSON.stringify([
+          { value: 'hindi', label: 'Hindi' },
+          { value: 'english', label: 'English' },
+          { value: 'telugu', label: 'Telugu' },
+          { value: 'tamil', label: 'Tamil' },
+          { value: 'kannada', label: 'Kannada' },
+        ]),
+        sortOrder: 19,
+      },
     ],
   });
 
-  console.log('✅ Screen 1 created: Customer & Enquiry (16 fields)');
+  console.log('✅ Screen 1 created: Customer & Enquiry (19 fields)');
 
   // ============================================
   // SCREEN 2: Address and More Details
@@ -672,9 +714,10 @@ async function main() {
         screenId: vehicleScreen.id,
         name: 'chassis_no',
         label: 'Chassis No',
-        fieldType: 'TEXT',
-        placeholder: 'Enter chassis number',
+        fieldType: 'SELECT',
+        placeholder: 'Select chassis number',
         isRequired: true,
+        options: JSON.stringify([]),
         sortOrder: 7,
       },
       {
@@ -1318,6 +1361,51 @@ async function main() {
         isReadOnly: true,
         sortOrder: 5,
       },
+      {
+        screenId: invoiceScreen.id,
+        name: 'customer_gender',
+        label: 'Gender',
+        fieldType: 'SELECT',
+        isRequired: false,
+        isReadOnly: false,
+        options: JSON.stringify([
+          { value: 'Male', label: 'Male' },
+          { value: 'Female', label: 'Female' },
+          { value: 'Other', label: 'Other' },
+        ]),
+        sortOrder: 6,
+      },
+      {
+        screenId: invoiceScreen.id,
+        name: 'customer_marital_status',
+        label: 'Marital Status',
+        fieldType: 'SELECT',
+        isRequired: false,
+        isReadOnly: false,
+        options: JSON.stringify([
+          { value: 'Single', label: 'Single' },
+          { value: 'Married', label: 'Married' },
+          { value: 'Divorced', label: 'Divorced' },
+          { value: 'Widowed', label: 'Widowed' },
+        ]),
+        sortOrder: 7,
+      },
+      {
+        screenId: invoiceScreen.id,
+        name: 'customer_language',
+        label: 'Language',
+        fieldType: 'SELECT',
+        isRequired: false,
+        isReadOnly: false,
+        options: JSON.stringify([
+          { value: 'Hindi', label: 'Hindi' },
+          { value: 'English', label: 'English' },
+          { value: 'Telugu', label: 'Telugu' },
+          { value: 'Tamil', label: 'Tamil' },
+          { value: 'Kannada', label: 'Kannada' },
+        ]),
+        sortOrder: 8,
+      },
       // Vehicle Details (fetched from vehicle_details)
       {
         screenId: invoiceScreen.id,
@@ -1326,7 +1414,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 6,
+        sortOrder: 9,
       },
       {
         screenId: invoiceScreen.id,
@@ -1335,7 +1423,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 7,
+        sortOrder: 10,
       },
       {
         screenId: invoiceScreen.id,
@@ -1344,7 +1432,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 8,
+        sortOrder: 11,
       },
       {
         screenId: invoiceScreen.id,
@@ -1353,7 +1441,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 9,
+        sortOrder: 12,
       },
       {
         screenId: invoiceScreen.id,
@@ -1362,7 +1450,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 10,
+        sortOrder: 13,
       },
       {
         screenId: invoiceScreen.id,
@@ -1371,7 +1459,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 11,
+        sortOrder: 14,
       },
       // Amount Details (fetched from amounts_tax)
       {
@@ -1381,7 +1469,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 12,
+        sortOrder: 15,
       },
       {
         screenId: invoiceScreen.id,
@@ -1390,7 +1478,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 13,
+        sortOrder: 16,
       },
       {
         screenId: invoiceScreen.id,
@@ -1399,7 +1487,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 14,
+        sortOrder: 17,
       },
       {
         screenId: invoiceScreen.id,
@@ -1408,7 +1496,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 15,
+        sortOrder: 18,
       },
       {
         screenId: invoiceScreen.id,
@@ -1417,7 +1505,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 16,
+        sortOrder: 19,
       },
       {
         screenId: invoiceScreen.id,
@@ -1426,7 +1514,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 17,
+        sortOrder: 20,
       },
       // Insurance Details
       {
@@ -1436,7 +1524,7 @@ async function main() {
         fieldType: 'TEXT',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 18,
+        sortOrder: 21,
       },
       {
         screenId: invoiceScreen.id,
@@ -1445,7 +1533,7 @@ async function main() {
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 19,
+        sortOrder: 22,
       },
     ],
   });

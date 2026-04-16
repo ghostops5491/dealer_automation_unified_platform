@@ -11,6 +11,7 @@ const PRE_BOOKING_CONFIG_KEYS = [
   'DealerCountry',
   'DealerState',
   'SALE_MODE',
+  'STORAGE_LOC',
 ];
 
 const PRE_BOOKING_DEFAULTS: Record<string, string> = {
@@ -21,6 +22,7 @@ const PRE_BOOKING_DEFAULTS: Record<string, string> = {
   DealerCountry: 'IN',
   DealerState: 'TG',
   SALE_MODE: '4',
+  STORAGE_LOC: '3',
 };
 
 // Voucher/Booking config keys (used by SaveBooking + Voucher submission)

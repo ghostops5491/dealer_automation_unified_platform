@@ -329,21 +329,6 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Check if ALL results are already booked
-    const allBooked = enquiryList.every((e: TVSEnquiry) => (e.Booked ?? 0) === 1);
-    if (allBooked && enquiryList.length === 1) {
-      const enquiry = enquiryList[0];
-      return res.status(409).json({
-        success: false,
-        error: mobileNumber
-          ? `Mobile number found but order is already booked (Enquiry #${enquiry.ENQUIRY_NO} - ${enquiry.CUST_NAME}).`
-          : `Enquiry #${enquiry.ENQUIRY_NO} is already booked (${enquiry.CUST_NAME}).`,
-        alreadyBooked: true,
-        enquiryNo: enquiry.ENQUIRY_NO,
-        customerName: enquiry.CUST_NAME,
-      });
-    }
-
     // If multiple results, return the list for user to select
     if (enquiryList.length > 1) {
       return res.json({
@@ -364,7 +349,7 @@ export const fetchEnquiryDetails = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Single result - map and return
+    // Single result - map and return (booked status is handled by frontend UI)
     const enquiry = enquiryList[0];
     const mappedData = mapTVSResponseToCRM(enquiry);
 
@@ -2433,5 +2418,1034 @@ export const submitVoucher = async (req: AuthRequest, res: Response) => {
       });
     }
     res.status(500).json({ success: false, error: error.message || 'Failed to submit voucher' });
+  }
+};
+
+// ──────────────────────────────────────────────────────────────
+// LoadVehicleFrameforAllotment — fetches available chassis numbers
+// for dropdown on Vehicle Details tab (post-booking).
+// ──────────────────────────────────────────────────────────────
+export const loadVehicleFrames = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryId, partId: explicitPartId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+
+    if (!user || !user.branch.dealerId || !user.branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    const branch = user.branch;
+
+    // Generate TVS token
+    let token: string;
+    try {
+      token = await generateTVSToken(
+        branch.dealerId!,
+        branch.externalBranchId!,
+        user.externalRoleId!,
+        user.externalLoginId!,
+        user.externalUserId!,
+      );
+    } catch (tokenError: any) {
+      return res.status(502).json({ success: false, error: `TVS token generation failed: ${tokenError.message}` });
+    }
+
+    // Resolve PART_ID — from explicit param, or from pre-booking cache, or from VehicleCatalog
+    let partIdResolved = explicitPartId;
+
+    if (!partIdResolved && enquiryId) {
+      ensureEnquiryCacheDir();
+      const preBookingFile = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+      if (fs.existsSync(preBookingFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(preBookingFile, 'utf-8'));
+          const pbData = parsed.response?.data || parsed.response || parsed;
+          partIdResolved =
+            pbData.BookingPartDetails?.[0]?.PART_ID ||
+            pbData.Enquiry?.ENQUIRY_MODEL_LIST?.[0]?.PART_ID ||
+            '';
+          console.log('LoadVehicleFrames: Resolved PART_ID from cache:', partIdResolved);
+        } catch { /* ignore parse errors */ }
+      }
+    }
+
+    if (!partIdResolved) {
+      return res.status(400).json({ success: false, error: 'PART_ID could not be resolved. Provide partId or a valid enquiryId with cached pre-booking data.' });
+    }
+
+    // STORAGE_LOC from branch config, default 3
+    const branchConfig = await getBranchConfig(branchId);
+    const storageLoc = Number(branchConfig.STORAGE_LOC) || 3;
+
+    const requestBody = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      PART_ID: partIdResolved,
+      STORAGE_LOC: storageLoc,
+    };
+
+    console.log('LoadVehicleFrameforAllotment request:', JSON.stringify(requestBody));
+
+    const apiResponse = await axios.post(
+      'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/LoadVehicleFrameforAllotment',
+      requestBody,
+      {
+        headers: {
+          'Content-Type': 'application/json;charset=UTF-8',
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json, text/plain, */*',
+        },
+        timeout: 30000,
+      },
+    );
+
+    const tvsResp = apiResponse.data;
+    console.log('LoadVehicleFrameforAllotment response statusCode:', tvsResp?.statusCode);
+    console.log('LoadVehicleFrameforAllotment response top-level keys:', tvsResp ? Object.keys(tvsResp) : 'null');
+    console.log('LoadVehicleFrameforAllotment response.data type:', typeof tvsResp?.data);
+    console.log('LoadVehicleFrameforAllotment response.data keys:', tvsResp?.data ? Object.keys(tvsResp.data) : 'null/missing');
+    if (tvsResp?.data?.VehicleList) {
+      console.log('VehicleList length:', tvsResp.data.VehicleList.length);
+    } else {
+      console.log('VehicleList NOT found at response.data.VehicleList');
+      console.log('Full response (first 500 chars):', JSON.stringify(tvsResp).substring(0, 500));
+    }
+
+    if (tvsResp.statusCode !== 200) {
+      return res.status(502).json({
+        success: false,
+        error: tvsResp.message || 'TVS API returned an error',
+        details: tvsResp,
+      });
+    }
+
+    const responseData = tvsResp.data || {};
+    const vehicleList: any[] = responseData.VehicleList || responseData.vehicleList || [];
+
+    if (vehicleList.length === 0) {
+      console.log('VehicleList is empty. responseData keys:', Object.keys(responseData));
+      return res.json({ success: true, data: [], count: 0, availableQty: responseData.AvailableQty || 0 });
+    }
+
+    // Map VehicleList to dropdown-friendly format using FRAME_NO
+    const chassisOptions = vehicleList
+      .filter((f: any) => f.FRAME_NO)
+      .map((f: any) => ({
+        value: f.FRAME_NO,
+        label: `${f.FRAME_NO} — ${f.DESCRIPTION || f.MODEL_DESCRIPTION || ''}`.trim(),
+        engineNo: f.ENGINE_NO || '',
+        vehicleId: f.VEHICLE_ID || 0,
+        keyNo: f.KEY_NO || '',
+        batteryNo: f.BATTERY_NO || '',
+        description: f.DESCRIPTION || '',
+        exShowroomPrice: f.EX_SHRM_PRICE || 0,
+        grnDate: f.GRN_DATE || '',
+        noOfDays: f.NO_OF_DAYS || 0,
+      }));
+
+    // Cache response for debugging
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `vehicle-frames-${enquiryId || partIdResolved}.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify({ request: requestBody, response: apiResponse.data, mapped: chassisOptions }, null, 2), 'utf-8');
+
+    res.json({
+      success: true,
+      data: chassisOptions,
+      count: chassisOptions.length,
+      availableQty: responseData.AvailableQty || 0,
+      partId: responseData.PartId || partIdResolved,
+    });
+  } catch (error: any) {
+    console.error('Error in loadVehicleFrames:', error);
+    if (axios.isAxiosError(error)) {
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+        details: error.response?.data,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to load vehicle frames' });
+  }
+};
+
+// ──────────────────────────────────────────────────────────────
+// Perform Allotment — two-step:
+//   1. GetHoUnlockPDIDetails (allotment with frame details)
+//   2. GetAllLocationOldFrameforAllotment (confirm chassis with PART_ID)
+// ──────────────────────────────────────────────────────────────
+export const performAllotment = async (req: AuthRequest, res: Response) => {
+  try {
+    const { frameNumber, vehicleId, noOfDays, engineNo, bookingNo, enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+
+    if (!frameNumber || !vehicleId) {
+      return res.status(400).json({ success: false, error: 'Frame number and vehicle ID are required. Select a chassis first.' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+
+    if (!user || !user.branch.dealerId || !user.branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    const branch = user.branch;
+
+    let token: string;
+    try {
+      token = await generateTVSToken(
+        branch.dealerId!,
+        branch.externalBranchId!,
+        user.externalRoleId!,
+        user.externalLoginId!,
+        user.externalUserId!,
+      );
+    } catch (tokenError: any) {
+      return res.status(502).json({ success: false, error: `TVS token generation failed: ${tokenError.message}` });
+    }
+
+    const apiHeaders = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/plain, */*',
+    };
+
+    // ── Step 1: GetHoUnlockPDIDetails ──
+    const step1Body = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      Frame_Number: frameNumber,
+      VEHICLE_ID: Number(vehicleId),
+      NO_OF_DAYS: Number(noOfDays) || 0,
+    };
+
+    console.log('Step 1 — GetHoUnlockPDIDetails request:', JSON.stringify(step1Body));
+
+    const step1Resp = await axios.post(
+      'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/GetHoUnlockPDIDetails',
+      step1Body,
+      { headers: apiHeaders, timeout: 30000 },
+    );
+
+    console.log('Step 1 — GetHoUnlockPDIDetails response:', JSON.stringify(step1Resp.data));
+
+    // ── Step 2: GetAllLocationOldFrameforAllotment ──
+    // Resolve PART_ID from multiple cache sources
+    let partIdResolved = '';
+    if (enquiryId) {
+      ensureEnquiryCacheDir();
+
+      // Source 1: pre-booking cache
+      const preBookingFile = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+      if (!partIdResolved && fs.existsSync(preBookingFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(preBookingFile, 'utf-8'));
+          const pbData = parsed.response?.data || parsed.response || parsed;
+          partIdResolved =
+            pbData.BookingPartDetails?.[0]?.PART_ID ||
+            pbData.Enquiry?.ENQUIRY_MODEL_LIST?.[0]?.PART_ID ||
+            '';
+        } catch { /* ignore */ }
+      }
+
+      // Source 2: set-line-item cache
+      if (!partIdResolved) {
+        const sliFile = path.join(ENQUIRY_CACHE_DIR, `set-line-item-${enquiryId}.json`);
+        if (fs.existsSync(sliFile)) {
+          try {
+            const parsed = JSON.parse(fs.readFileSync(sliFile, 'utf-8'));
+            partIdResolved = parsed.request?.PART_ID || parsed.response?.data?.[0]?.PART_ID || '';
+          } catch { /* ignore */ }
+        }
+      }
+
+      // Source 3: save-booking cache
+      if (!partIdResolved) {
+        const sbFile = path.join(ENQUIRY_CACHE_DIR, `save-booking-${enquiryId}.json`);
+        if (fs.existsSync(sbFile)) {
+          try {
+            const parsed = JSON.parse(fs.readFileSync(sbFile, 'utf-8'));
+            const sbResp = parsed.response?.data || parsed.response || {};
+            const sbDet = sbResp.BookingDet || sbResp;
+            partIdResolved = sbDet.BookPartDetailsList?.[0]?.PART_ID || sbDet.PART_ID || '';
+          } catch { /* ignore */ }
+        }
+      }
+
+      console.log('Allotment: partIdResolved =', partIdResolved, 'for enquiryId =', enquiryId);
+    }
+
+    let step2Response: any = null;
+    if (partIdResolved) {
+      const step2Body = {
+        DEALER_ID: branch.dealerId,
+        BRANCH_ID: branch.externalBranchId,
+        PART_ID: partIdResolved,
+        STORAGE_LOC: -1,
+      };
+
+      console.log('Step 2 — GetAllLocationOldFrameforAllotment request:', JSON.stringify(step2Body));
+
+      try {
+        const step2Resp = await axios.post(
+          'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/GetAllLocationOldFrameforAllotment',
+          step2Body,
+          { headers: apiHeaders, timeout: 30000 },
+        );
+        step2Response = step2Resp.data;
+        console.log('Step 2 — GetAllLocationOldFrameforAllotment response statusCode:', step2Response?.statusCode);
+      } catch (step2Err: any) {
+        console.error('Step 2 — GetAllLocationOldFrameforAllotment error:', step2Err.message);
+      }
+    } else {
+      console.warn('Allotment: PART_ID not resolved from cache, skipping GetAllLocationOldFrame step');
+    }
+
+    // ── Step 3: SaveAllotment ──
+    // Load pre-booking data for customer/booking details
+    let pbData: any = {};
+    if (enquiryId) {
+      const preBookingFile = path.join(ENQUIRY_CACHE_DIR, `pre-booking-${enquiryId}.json`);
+      if (fs.existsSync(preBookingFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(preBookingFile, 'utf-8'));
+          pbData = parsed.response?.data || parsed.response || parsed;
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Also load save-booking and search-booking caches as fallback sources for CUSTOMER_ID
+    let sbData: any = {};
+    let searchBookingData: any = {};
+    if (enquiryId) {
+      const sbFile = path.join(ENQUIRY_CACHE_DIR, `save-booking-${enquiryId}.json`);
+      if (fs.existsSync(sbFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(sbFile, 'utf-8'));
+          sbData = parsed.response?.data || parsed.response || {};
+        } catch { /* ignore */ }
+      }
+      // Search-booking cache may be keyed by enquiryId or contactNo
+      const searchFile = path.join(ENQUIRY_CACHE_DIR, `search-booking-${enquiryId}.json`);
+      if (fs.existsSync(searchFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(searchFile, 'utf-8'));
+          const bookingList = parsed.response?.data?.BookingList || [];
+          if (bookingList.length > 0) {
+            searchBookingData = bookingList.sort((a: any, b: any) =>
+              new Date(b.BOOKING_DATE || 0).getTime() - new Date(a.BOOKING_DATE || 0).getTime()
+            )[0];
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    const pbCustomer = pbData.Customer || {};
+    const pbEnquiry = pbData.Enquiry || {};
+    const pbPart0 = (pbData.BookingPartDetails || [])[0] || {};
+    const branchConfig = await getBranchConfig(branchId);
+    const storageLoc = Number(branchConfig.STORAGE_LOC) || 3;
+    const createdBy = Number(branchConfig.CREATED_BY) || 0;
+    const finYear = Number(getIndianFinancialYear());
+    const now = new Date();
+    const isoNow = now.toISOString();
+
+    const pbBooking = pbData.Booking || {};
+    const sbBookingDet = sbData?.BookingDet || sbData || {};
+
+    // Resolve CUSTOMER_ID: pre-booking > save-booking > search-booking > frontend bookingNo fallback
+    const customerId = pbCustomer.CUSTOMER_ID || pbEnquiry.CUSTOMER_ID || sbBookingDet.CUSTOMER_ID || searchBookingData.CUSTOMER_ID || 0;
+    const endUserId = pbEnquiry.END_USER_ID || sbBookingDet.END_USER_ID || customerId;
+    const custName = pbCustomer.CUST_NAME || sbBookingDet.CUSTOMER_NAME || searchBookingData.CUST_NAME || '';
+    const customerType = pbCustomer.CUSTOMER_TYPE || searchBookingData.CustomerType || 'Individual';
+    console.log('SaveAllotment: CUSTOMER_ID resolution — pbCustomer:', pbCustomer.CUSTOMER_ID, ', pbEnquiry:', pbEnquiry.CUSTOMER_ID, ', sbBookingDet:', sbBookingDet.CUSTOMER_ID, ', searchBooking:', searchBookingData.CUSTOMER_ID, '→ final:', customerId);
+
+    // Resolve BOOKING_ID from pre-booking cache (authoritative), NOT from frontend form field
+    const resolvedBookingNo = pbBooking.BOOKING_ID || pbBooking.BOOKING_NO || sbBookingDet.BOOKING_ID || sbBookingDet.BOOKING_NO || searchBookingData.BOOKING_ID || searchBookingData.BOOKING_NO || pbPart0.BOOKING_NO || Number(bookingNo) || 0;
+    console.log('SaveAllotment: resolvedBookingNo =', resolvedBookingNo, '(frontend bookingNo =', bookingNo, ', cache Booking.BOOKING_ID =', pbBooking.BOOKING_ID, ', sbBookingDet.BOOKING_ID =', sbBookingDet.BOOKING_ID, ', searchBooking.BOOKING_ID =', searchBookingData.BOOKING_ID, ')');
+    const bookPartId = pbPart0.BOOK_PART_ID ?? sbBookingDet.BookPartDetailsList?.[0]?.BOOK_PART_ID ?? 0;
+    const bookingValue = pbPart0.TOTAL_AMOUNT ?? pbPart0.EX_SHRM_PRICE ?? 0;
+    const bookedQty = pbPart0.BOOKED_QTY ?? 1;
+    const custCatId = pbCustomer.CUST_CAT_ID ?? searchBookingData.CUST_TY_ID ?? 1;
+    const partDesc = pbPart0.DESCRIPTION || pbPart0.PART_DESC || '';
+    const bookingDate = pbData.Booking?.BOOKING_DATE
+      ? new Date(pbData.Booking.BOOKING_DATE).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+
+    // Load full raw frame object from vehicle-frames cache for SelectedVehicleList
+    let fullFrameObject: any = null;
+    const framesCacheFile = path.join(ENQUIRY_CACHE_DIR, `vehicle-frames-${enquiryId || partIdResolved}.json`);
+    if (fs.existsSync(framesCacheFile)) {
+      try {
+        const framesParsed = JSON.parse(fs.readFileSync(framesCacheFile, 'utf-8'));
+        const rawResponse = framesParsed.response?.data || framesParsed.response || {};
+        const rawData = rawResponse.data || rawResponse;
+        const rawVehicleList: any[] = rawData.VehicleList || rawData.vehicleList || [];
+        fullFrameObject = rawVehicleList.find((f: any) => f.FRAME_NO === frameNumber) || null;
+        console.log('SaveAllotment: full frame object found =', !!fullFrameObject, 'from cache file =', framesCacheFile);
+      } catch (e) {
+        console.warn('SaveAllotment: failed to read vehicle-frames cache:', e);
+      }
+    } else {
+      console.warn('SaveAllotment: vehicle-frames cache not found at', framesCacheFile);
+    }
+
+    // Build SelectedVehicleList: use full raw frame with STORAGE_LOC appended
+    const selectedVehicle = fullFrameObject
+      ? { ...fullFrameObject, STORAGE_LOC: storageLoc }
+      : {
+          FRAME_NO: frameNumber,
+          ENGINE_NO: engineNo || '',
+          VEHICLE_ID: Number(vehicleId),
+          PART_ID: partIdResolved || pbPart0.PART_ID || '',
+          WARRANTY_BOOKELET_NO: null,
+          STORAGE_LOC: storageLoc,
+          RECAL_FRAME_MSG: null,
+          RECOMMENDED_FRAMENUMBER_STATUS: 'FIFO Recommended',
+        };
+
+    const step3Body = {
+      IS_ATP_ENABLED: false,
+      IS_CALL_ATP_FOR_FRAME_NO_AVAILABILITY: false,
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      IS_EMAP: null,
+      AMD_ID: 0,
+      BOOKING_ID: resolvedBookingNo,
+      ALLOTMENT_DATE: isoNow,
+      CUSTOMER_ID: customerId,
+      END_USER_ID: endUserId,
+      STATUS: 1,
+      REMARKS: '',
+      INVOICED: false,
+      CREATED_BY: createdBy,
+      MODIFIED_BY: null,
+      FIN_YEAR: finYear,
+      CREATED_ON: isoNow,
+      AllotedVehicleList: [{
+        BOOKING_NO: resolvedBookingNo,
+        CUST_NAME: custName,
+        CUSTOMER_TYPE: customerType,
+        BOOKING_DATE: bookingDate,
+        BOOKING_VALUE: bookingValue,
+        BOOKED_QTY: bookedQty,
+        ALLOTED_QTY: 0,
+        PART_DESC: partDesc || fullFrameObject?.DESCRIPTION || '',
+        PART_ID: partIdResolved || pbPart0.PART_ID || fullFrameObject?.PART_ID || '',
+        CUSTOMER_ID: customerId,
+        BOOK_PART_ID: bookPartId,
+        CUST_CAT_ID: custCatId,
+        STORAGE_LOC: storageLoc,
+        VEHICLE_ID: Number(vehicleId),
+        VEHICLE_INVOICED: false,
+        ACCESS_SEL: false,
+        LIKE_DT_OF_REGIS: null,
+        ACC_FIT_DATE: null,
+        DELIVERY_DATE: null,
+      }],
+      SelectedVehicleList: [selectedVehicle],
+    };
+
+    console.log('Step 3 — SaveAllotment request:', JSON.stringify(step3Body, null, 2));
+
+    let step3Response: any = null;
+    try {
+      const step3Resp = await axios.post(
+        'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SaveAllotment',
+        step3Body,
+        { headers: apiHeaders, timeout: 30000 },
+      );
+      step3Response = step3Resp.data;
+      console.log('Step 3 — SaveAllotment response:', JSON.stringify(step3Response));
+    } catch (step3Err: any) {
+      console.error('Step 3 — SaveAllotment error:', step3Err.response?.data || step3Err.message);
+      step3Response = { statusCode: 500, error: step3Err.response?.data?.message || step3Err.message };
+    }
+
+    // Cache all responses
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `allotment-${enquiryId || frameNumber}.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      step1_HoUnlockPDI: { request: step1Body, response: step1Resp.data },
+      step2_AllLocationOldFrame: { request: partIdResolved ? { DEALER_ID: branch.dealerId, BRANCH_ID: branch.externalBranchId, PART_ID: partIdResolved, STORAGE_LOC: -1 } : 'skipped', response: step2Response },
+      step3_SaveAllotment: { request: step3Body, response: step3Response },
+    }, null, 2), 'utf-8');
+
+    const allSuccess = step1Resp.data.statusCode === 200 && (step3Response?.statusCode === 200 || step3Response?.statusCode === undefined);
+
+    if (!allSuccess) {
+      return res.status(502).json({
+        success: false,
+        error: step3Response?.message || step1Resp.data.message || 'Allotment failed',
+        step1Status: step1Resp.data.statusCode,
+        step2Status: step2Response?.statusCode,
+        step3Status: step3Response?.statusCode,
+        details: { step1: step1Resp.data, step3: step3Response },
+      });
+    }
+
+    res.json({
+      success: true,
+      data: step3Response?.data || step1Resp.data.data,
+      message: 'Allotment saved successfully',
+      step1Status: step1Resp.data.statusCode,
+      step2Status: step2Response?.statusCode,
+      step3Status: step3Response?.statusCode,
+    });
+  } catch (error: any) {
+    console.error('Error in performAllotment:', error);
+    if (axios.isAxiosError(error)) {
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+        details: error.response?.data,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to perform allotment' });
+  }
+};
+
+// ==================== SAVE BOOKING AFTER ALLOTMENT ====================
+// Re-calls SaveBooking with post-allotment modifications (ALLOTED_QTY=1, VEHICLE_ID, ROW_STATE=Modified, etc.)
+// Uses cached data from pre-booking, set-line-item, save-booking, allotment, and vehicle-frames.
+export const saveBookingAfterAllotment = async (req: AuthRequest, res: Response) => {
+  try {
+    const { enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+    if (!enquiryId) {
+      return res.status(400).json({ success: false, error: 'enquiryId is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+    if (!user || !user.branch.dealerId || !user.branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+    const branch = user.branch;
+
+    let token: string;
+    try {
+      token = await generateTVSToken(
+        branch.dealerId!,
+        branch.externalBranchId!,
+        user.externalRoleId!,
+        user.externalLoginId!,
+        user.externalUserId!,
+      );
+    } catch (tokenError: any) {
+      return res.status(502).json({ success: false, error: `TVS token generation failed: ${tokenError.message}` });
+    }
+
+    ensureEnquiryCacheDir();
+
+    // ── Load all cached data ──
+    const readCache = (filename: string): any => {
+      const filePath = path.join(ENQUIRY_CACHE_DIR, filename);
+      if (!fs.existsSync(filePath)) return null;
+      try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { return null; }
+    };
+
+    const preBookingCache = readCache(`pre-booking-${enquiryId}.json`);
+    const setLineItemCache = readCache(`set-line-item-${enquiryId}.json`);
+    const saveBookingCache = readCache(`save-booking-${enquiryId}.json`);
+    const allotmentCache = readCache(`allotment-${enquiryId}.json`);
+
+    const pbData = preBookingCache?.response?.data || preBookingCache?.response || {};
+    const pbCustomer = pbData.Customer || {};
+    const pbEnquiry = pbData.Enquiry || {};
+    const pbBooking = pbData.Booking || {};
+    const pbParts: any[] = pbData.BookingPartDetails || [];
+    const pbPart0 = pbParts[0] || {};
+
+    // The original save-booking request is the best base — it already has the full structure
+    const originalBookingRequest = saveBookingCache?.request || {};
+    // save-booking response for fallback IDs
+    const sbResponse = saveBookingCache?.response?.data || saveBookingCache?.response || {};
+    const sbDet = sbResponse.BookingDet || sbResponse;
+    const sbPart0 = sbDet.BookPartDetailsList?.[0] || {};
+    // set-line-item request as fallback base
+    const sliRequest = setLineItemCache?.request || {};
+    const sliPart0 = sliRequest.BookPartDetailsList?.[0] || {};
+
+    // Search-booking cache for additional fallback
+    const searchBookingCache = readCache(`search-booking-${enquiryId}.json`);
+    let searchBookingData: any = {};
+    if (searchBookingCache) {
+      const bookingList = searchBookingCache.response?.data?.BookingList || [];
+      if (bookingList.length > 0) {
+        searchBookingData = [...bookingList].sort((a: any, b: any) =>
+          new Date(b.BOOKING_DATE || 0).getTime() - new Date(a.BOOKING_DATE || 0).getTime()
+        )[0];
+      }
+    }
+
+    const branchConfig = await getBranchConfig(branchId);
+    const createdBy = Number(branchConfig.CREATED_BY) || 0;
+    const storageLoc = Number(branchConfig.STORAGE_LOC) || 3;
+    const finYear = Number(getIndianFinancialYear());
+    const today = new Date();
+    const bookingDateFormatted = pbBooking.BOOKING_DATE
+      ? new Date(pbBooking.BOOKING_DATE).toISOString().split('T')[0]
+      : `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const createdOnFormatted = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+    const modifiedOnFormatted = createdOnFormatted;
+
+    // Resolve IDs from allotment response
+    const allotmentStep3 = allotmentCache?.step3_SaveAllotment?.response || {};
+    const allotmentData = allotmentStep3?.data || allotmentStep3 || {};
+    const allotVehId = allotmentData.ALLOT_VEH_ID || allotmentData.AllotmentId || 0;
+
+    // Resolve vehicle ID and frame number from allotment request
+    const allotmentStep3Req = allotmentCache?.step3_SaveAllotment?.request || {};
+    const allottedVehicle = allotmentStep3Req.SelectedVehicleList?.[0] || {};
+    const selectedVehicleId = allottedVehicle.VEHICLE_ID || sbPart0.VEHICLE_ID || pbPart0.VEHICLE_ID || 0;
+    const selectedFrameNo = allottedVehicle.FRAME_NO || '';
+
+    // Core booking identifiers — multi-source resolution
+    const bookingId = pbBooking.BOOKING_ID || sbDet.BOOKING_ID || originalBookingRequest.BOOKING_ID || searchBookingData.BOOKING_ID || Number(pbPart0.BOOKING_NO) || 0;
+    const bookingNo = pbBooking.BOOKING_NO || sbDet.BOOKING_NO || originalBookingRequest.BOOKING_NO || searchBookingData.BOOKING_NO || bookingId;
+    const customerId = pbCustomer.CUSTOMER_ID || pbEnquiry.CUSTOMER_ID || sbDet.CUSTOMER_ID || searchBookingData.CUSTOMER_ID || 0;
+    const endUserId = pbEnquiry.END_USER_ID || sbDet.END_USER_ID || customerId;
+    const refCustId = pbEnquiry.REFERRAL_CUSTOMER_ID || pbBooking.REF_CUST_ID || sbDet.REF_CUST_ID || originalBookingRequest.REF_CUST_ID || 0;
+    const salesmanId = pbEnquiry.SALESMAN_ID || pbBooking.SALESMAN_ID || originalBookingRequest.SALESMAN_ID || 1;
+    const insTypeId = (pbBooking.INS_TYPE_ID ?? originalBookingRequest.INS_TYPE_ID ?? Number(branchConfig.INS_TYPE_ID)) || 3;
+    const insCompId = (pbBooking.INS_COMP_ID ?? originalBookingRequest.INS_COMP_ID ?? Number(branchConfig.INS_COMP_ID)) || 4;
+    const rtoId = (pbBooking.RTO_ID ?? originalBookingRequest.RTO_ID ?? Number(branchConfig.RTO_ID)) || 0;
+    const regisTypeId = (pbBooking.REGIS_TYPE_ID ?? originalBookingRequest.REGIS_TYPE_ID ?? Number(branchConfig.REG_TYPE_ID)) || 1;
+    const enquiryModeId = pbEnquiry.ENQUIRY_MODE_ID || originalBookingRequest.ENQUIRY_MODE_ID || 4;
+    const enquiryMode = pbEnquiry.ENQUIRY_MODE || originalBookingRequest.ENQUIRY_MODE || 'Direct marketing';
+
+    // Amounts — pre-booking > save-booking response > original request
+    const unitPrice = pbPart0.UNIT_PRICE || pbPart0.EX_SHRM_PRICE || sbPart0.UNIT_PRICE || sbPart0.EX_SHRM_PRICE || 0;
+    const taxAmount = pbPart0.TAX_AMOUNT || sbPart0.TAX_AMOUNT || 0;
+    const totalAmount = pbPart0.TOTAL_AMOUNT || sbPart0.TOTAL_AMOUNT || (unitPrice + taxAmount);
+    const bookingAmt = pbBooking.BOOKING_AMT || originalBookingRequest.BOOKING_AMT || sbDet.BOOKING_AMT || 0;
+    const partId = pbPart0.PART_ID || sbPart0.PART_ID || sliPart0.PART_ID || allottedVehicle.PART_ID || '';
+    const modelId = pbPart0.MODEL_ID || sbPart0.MODEL_ID || sliPart0.MODEL_ID || allottedVehicle.MODEL_ID || '';
+    const partDesc = pbPart0.DESCRIPTION || pbPart0.PART_DESC || sbPart0.PART_DESC || allottedVehicle.DESCRIPTION || '';
+    const bookPartId = pbPart0.BOOK_PART_ID || sbPart0.BOOK_PART_ID || 0;
+
+    console.log('SaveBookingAfterAllotment: ALLOT_VEH_ID =', allotVehId, ', bookingId =', bookingId, ', customerId =', customerId, ', partId =', partId, ', modelId =', modelId, ', bookPartId =', bookPartId);
+
+    // Tax lists from pre-booking
+    const bookingPartTaxList = pbPart0.BookingPartTaxList || [];
+    const bookingTaxList = bookingPartTaxList.map((t: any) => ({
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      BOOK_PART_TAX_ID: t.BOOK_PART_TAX_ID || 0,
+      BOOK_PART_ID: bookPartId,
+      DESCRIPTION: t.DESCRIPTION || '',
+      TAX_PERC: t.TAX_PERC || 0,
+      APPLIED_AMT: t.APPLIED_AMT || unitPrice,
+      ROW_STATE: t.ROW_STATE || 0,
+      TaxValue: t.TaxValue || 0,
+      TAX_TYPE_ID: t.TAX_TYPE_ID || 0,
+      RUNNING_NO: t.RUNNING_NO || 0,
+    }));
+
+    // Build BookPartDetailsList — take full structure from pbPart0 and overlay allotment data
+    const bookPartDetails = {
+      ...pbPart0,
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      RunningNo: bookPartId,
+      BOOK_PART_ID: bookPartId,
+      PART_ID: partId,
+      MODEL_ID: modelId,
+      UNIT_PRICE: unitPrice,
+      EX_SHRM_PRICE: unitPrice,
+      BOOKED_QTY: pbPart0.BOOKED_QTY || 1,
+      ALLOTED_QTY: 1,
+      PENDING_QTY: 0,
+      TAX_AMOUNT: taxAmount,
+      TOTAL_AMOUNT: totalAmount,
+      VEHICLE_ID: selectedVehicleId,
+      ALLOT_VEH_ID: allotVehId,
+      PART_DESC: partDesc,
+      DESCRIPTION: null,
+      ROW_STATE: 'Modified',
+      STATUS: 0,
+      ROW_SELECT: true,
+      BookingPartTaxList: bookingPartTaxList,
+      BookingSchemeList: pbPart0.BookingSchemeList || [],
+      AppVehicleSchemeList: pbPart0.AppVehicleSchemeList || [],
+      SelectedVehicleSchemeList: pbPart0.SelectedVehicleSchemeList || null,
+      AccessoryList: pbPart0.AccessoryList || null,
+      AllotmentList: pbPart0.AllotmentList || null,
+      SERIES: pbPart0.SERIES || null,
+      IS_EV_VEH: pbPart0.IS_EV_VEH || false,
+      VEHICLE_SCH_ID: pbPart0.VEHICLE_SCH_ID || null,
+      ApplicableTax: pbPart0.ApplicableTax || null,
+      AccInvDetails: pbPart0.AccInvDetails || null,
+    };
+
+    // ModelPart — from set-line-item cache or pre-booking
+    if (sliRequest.BookPartDetailsList?.[0]?.ModelPart) {
+      bookPartDetails.ModelPart = sliRequest.BookPartDetailsList[0].ModelPart;
+    } else if (pbPart0.ModelPart) {
+      bookPartDetails.ModelPart = pbPart0.ModelPart;
+    }
+
+    // modelPartList — from set-line-item cache or pre-booking
+    if (sliRequest.BookPartDetailsList?.[0]?.modelPartList) {
+      bookPartDetails.modelPartList = sliRequest.BookPartDetailsList[0].modelPartList;
+    } else if (pbPart0.modelPartList) {
+      bookPartDetails.modelPartList = pbPart0.modelPartList;
+    }
+
+    // Ref customer name — from save-booking response, pre-booking, or original request
+    const refCustName = sbDet.RefCustName || pbBooking.RefCustName || originalBookingRequest.RefCustName || pbEnquiry.REFERRAL_CUSTOMER_NAME || '';
+
+    // OpenValueList from save-booking response, original request, or pre-booking
+    const openValueList = sbDet.OpenValueList || originalBookingRequest.OpenValueList || pbData.OpenValueList || [{
+      DEALER_ID: 0, BRANCH_ID: 0, OPEN_VALUE_ID: 0,
+      COMPANY_ID: Number(branchConfig.COMPANY_ID) || 19904,
+      COMPANY_NAME: refCustName || '',
+      DOC_NO: null, DOC_DATE: null, DOC_TYPE: 0,
+      PAR_DOC_NO: null, PAR_DOC_TYPE: null, PAR_DOC_DATE: null,
+      OPEN_VALUE: 0, IsParentDoc: false, CREDIT_LIMIT_DAYS: 0,
+      CUSTOMER_ID: null, ADVANCE_UTILISED: 0, ADVANCE_UN_UTILISED: 0, ADVANCE_AMOUNT: 0,
+    }];
+
+    const saveBookingBody = {
+      BOOKING_SOURCE_DESC: pbBooking.BOOKING_SOURCE_DESC || null,
+      BOOKING_SOURCE_ID: pbBooking.BOOKING_SOURCE_ID || 0,
+      IS_FULL_PAYMENT_RECEIVED: pbBooking.IS_FULL_PAYMENT_RECEIVED || false,
+      FULL_PAYMENT_DATE: pbBooking.FULL_PAYMENT_DATE || null,
+      FULL_PAYMENT_RECEIVED_BY_NAME: pbBooking.FULL_PAYMENT_RECEIVED_BY_NAME || null,
+      AccInvDetails: null,
+      is_quick_booking: 0,
+      INVOICE_ID: pbBooking.INVOICE_ID || 0,
+      DEALER_ID: branch.dealerId,
+      PART_ID: null,
+      MODEL_ID: null,
+      FRAME_NO: null,
+      BRANCH_ID: branch.externalBranchId,
+      BOOKING_ID: bookingId,
+      BOOKING_NO: bookingNo,
+      BOOKING_DATE: bookingDateFormatted,
+      RefCustName: refCustName,
+      BOOKING_TYPE: pbBooking.BOOKING_TYPE ?? false,
+      ENQUIRY_ID: Number(enquiryId),
+      ENQUIRY_NO: Number(enquiryId),
+      QUOTATION_ID: pbBooking.QUOTATION_ID || null,
+      CUSTOMER_ID: customerId,
+      END_USER_ID: endUserId,
+      FOLLOWUP_ENQ: pbBooking.FOLLOWUP_ENQ ?? false,
+      SALESMAN_ID: salesmanId,
+      CUST_MNG_INSR: pbBooking.CUST_MNG_INSR ?? false,
+      INS_TYPE_ID: insTypeId,
+      INS_COMP_ID: insCompId,
+      INSR_CNOTE_GIVEN: pbBooking.INSR_CNOTE_GIVEN ?? false,
+      CUST_MNGD_REG: pbBooking.CUST_MNGD_REG ?? false,
+      RTO_ID: rtoId,
+      REGIS_TYPE_ID: regisTypeId,
+      DEL_WOUT_REG: pbBooking.DEL_WOUT_REG ?? false,
+      DLR_DEL_DATE: pbBooking.DLR_DEL_DATE || '',
+      CUST_DEL_DATE: pbBooking.CUST_DEL_DATE || '',
+      HpDocList: pbBooking.HpDocList || [],
+      BookingTaxList: bookingTaxList,
+      DISC_VALUE: pbBooking.DISC_VALUE || null,
+      TOT_ACC_CHRGS: pbBooking.TOT_ACC_CHRGS ?? originalBookingRequest.TOT_ACC_CHRGS ?? 0,
+      TOT_REG_CHRGS: pbBooking.TOT_REG_CHRGS ?? originalBookingRequest.TOT_REG_CHRGS ?? 0,
+      TOT_AMT_PAID: pbBooking.TOT_AMT_PAID || null,
+      TOT_AMT_DUE: totalAmount,
+      TOT_AMT_PNDG: totalAmount,
+      COMMENTS: pbBooking.COMMENTS || null,
+      SPL_REG_REQ: pbBooking.SPL_REG_REQ || null,
+      SLF_ARNGD_HP: pbBooking.SLF_ARNGD_HP ?? false,
+      REASON_ID: pbBooking.REASON_ID || null,
+      REMARKS: pbBooking.REMARKS || null,
+      IS_FORMC: pbBooking.IS_FORMC ?? false,
+      COMM_PAID: pbBooking.COMM_PAID ?? false,
+      BULK_INVOICE_ID: pbBooking.BULK_INVOICE_ID || null,
+      STATUS: 1,
+      CREATED_BY: createdBy,
+      CREATED_ON: createdOnFormatted,
+      MODIFIED_BY: createdBy,
+      MODIFIED_ON: modifiedOnFormatted,
+      ACTIVE: true,
+      ExchangeCompanyId: pbBooking.ExchangeCompanyId || null,
+      REF_CUST_ID: refCustId,
+      BookingPartList: null,
+      CustomerDetails: null,
+      EndUserDetails: null,
+      BookPartDetailsList: [bookPartDetails],
+      ExchangeBookList: pbBooking.ExchangeBookList || originalBookingRequest.ExchangeBookList || [],
+      BookHPDetails: pbBooking.BookHPDetails || null,
+      SelfHPDetails: pbBooking.SelfHPDetails || null,
+      Voucher: pbBooking.Voucher || null,
+      ROW_STATE: 'Modified',
+      BookingExchangePart: pbBooking.BookingExchangePart || null,
+      VehicleInvoiceList: pbBooking.VehicleInvoiceList || originalBookingRequest.VehicleInvoiceList || [],
+      VehicleAllotment: pbBooking.VehicleAllotment || null,
+      AllotmentDetilList: pbBooking.AllotmentDetilList || null,
+      Type: 0,
+      FIN_YEAR: finYear,
+      SL_CODE: pbCustomer.SL_CODE || 0,
+      QUOTATION_NO: pbBooking.QUOTATION_NO || '',
+      RefCustomerType: sbDet.RefCustomerType || pbEnquiry.RefCustomerType || originalBookingRequest.RefCustomerType || 'IndirectASC',
+      REF_CUST_TY_ID: sbDet.REF_CUST_TY_ID ?? pbBooking.REF_CUST_TY_ID ?? 0,
+      IS_THRU_MULTI_INVOICE: pbBooking.IS_THRU_MULTI_INVOICE ?? false,
+      OpenValueList: openValueList,
+      INTERNET_ENQUIRY_ID: pbEnquiry.INTERNET_ENQUIRY_ID || 0,
+      INTERNET_ENQUIRY_ID_S: pbEnquiry.INTERNET_ENQUIRY_ID_S || null,
+      BOOK_AMT: pbBooking.BOOK_AMT || null,
+      ENQUIRY_MODE: enquiryMode,
+      ENQUIRY_MODE_ID: enquiryModeId,
+      COUNTRY_CODE: branchConfig.DealerCountry || branch.countryCode || 'IN',
+      Acceptance: pbBooking.Acceptance || null,
+      IS_THRU_ANGULAR: pbBooking.IS_THRU_ANGULAR || null,
+      PART_CHANGED_FROM_INET: pbBooking.PART_CHANGED_FROM_INET || null,
+      UPDATED_AFTER_CHANGE: pbBooking.UPDATED_AFTER_CHANGE || null,
+      IS_EMS: pbBooking.IS_EMS || null,
+      STATE_ID: branchConfig.DealerState || pbBooking.STATE_ID || 'TG',
+      BOOKING_AMT: bookingAmt,
+      IS_BOOKING_ACKNOWLEDGED: pbBooking.IS_BOOKING_ACKNOWLEDGED ?? false,
+      BOOKING_FOLLOWUP_STATUS: pbBooking.BOOKING_FOLLOWUP_STATUS || null,
+      VehicleArrivalDetails: pbBooking.VehicleArrivalDetails || null,
+      IS_ATP_ENABLED: false,
+      AMD_Accept: pbBooking.AMD_Accept ?? false,
+      AD_BOOKING_ID: pbBooking.AD_BOOKING_ID || 0,
+      Ad_DealerId: pbBooking.Ad_DealerId || 0,
+      PERMIT_STATUS: pbBooking.PERMIT_STATUS || null,
+      VEHICLE_USER: pbBooking.VEHICLE_USER || null,
+      REFERRAL_CUSTOMER_NAME: sbDet.REFERRAL_CUSTOMER_NAME || pbEnquiry.REFERRAL_CUSTOMER_NAME || null,
+      REFERRAL_CUSTOMER_TYPE: sbDet.REFERRAL_CUSTOMER_TYPE || pbEnquiry.REFERRAL_CUSTOMER_TYPE || null,
+      REFERRAL_CUSTOMER_MOBILE_NUMBER: sbDet.REFERRAL_CUSTOMER_MOBILE_NUMBER || pbEnquiry.REFERRAL_CUSTOMER_MOBILE_NUMBER || null,
+      RefCustomerTypeId: sbDet.RefCustomerTypeId ?? pbEnquiry.RefCustomerTypeId ?? pbBooking.RefCustomerTypeId ?? 3,
+      Is_TRV: false,
+      TM_APPROVE_STATUS: 0,
+      Is_EMAIL_SENT: false,
+      IS_SERIES_RESTRICTION_ENABLED: false,
+      BOOKING_TYPE_DESC: pbBooking.BOOKING_TYPE_DESC || 'Single',
+      STATUS_DESC: 'Alloted',
+      CUSTOMER_NAME: pbCustomer.CUST_NAME || sbDet.CUSTOMER_NAME || searchBookingData.CUST_NAME || '',
+      CUSTOMER_TYPE: pbCustomer.CUSTOMER_TYPE || sbDet.CUSTOMER_TYPE || searchBookingData.CustomerType || 'Individual',
+      TOT_UNIT_PRICE: unitPrice,
+      TOT_LINE_DISC: pbBooking.TOT_LINE_DISC ?? originalBookingRequest.TOT_LINE_DISC ?? 0,
+      TOT_TAX_VAL: taxAmount,
+      TOT_SUB_TOT1: totalAmount,
+      TOT_SUB_TOT2: totalAmount,
+      TOT_BILL_DISC: pbBooking.TOT_BILL_DISC ?? 0,
+      TOT_ADV_AMT: pbBooking.TOT_ADV_AMT ?? 0,
+      TOT_RFND_AMT: pbBooking.TOT_RFND_AMT ?? 0,
+      QUOTATION_DATE: pbBooking.QUOTATION_DATE || '',
+      ENQUIRY_DATE: pbEnquiry.ENQUIRY_DATE || '',
+      END_USER: null,
+    };
+
+    console.log('SaveBookingAfterAllotment request:', JSON.stringify(saveBookingBody, null, 2));
+
+    const apiResponse = await axios.post(
+      'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SaveBooking',
+      saveBookingBody,
+      {
+        headers: {
+          'Content-Type': 'application/json;charset=UTF-8',
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json, text/plain, */*',
+        },
+        timeout: 30000,
+      },
+    );
+
+    console.log('SaveBookingAfterAllotment response status:', apiResponse.status);
+
+    // Cache the response
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `save-booking-after-allotment-${enquiryId}.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      enquiryId: String(enquiryId),
+      savedBy: user.username,
+      savedAt: new Date().toISOString(),
+      request: saveBookingBody,
+      response: apiResponse.data,
+    }, null, 2), 'utf-8');
+
+    const respData = apiResponse.data;
+    if (respData.statusCode && respData.statusCode !== 200) {
+      return res.status(502).json({
+        success: false,
+        error: respData.message || 'SaveBooking after allotment failed',
+        details: respData,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: respData.data || respData,
+      message: 'Booking saved after allotment successfully',
+    });
+
+  } catch (error: any) {
+    console.error('Error in saveBookingAfterAllotment:', error);
+    if (axios.isAxiosError(error)) {
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: error.response?.data?.message || error.message,
+        details: error.response?.data,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to save booking after allotment' });
+  }
+};
+
+// ── SearchBooking — fetch booked details by phone number ──
+export const searchBooking = async (req: AuthRequest, res: Response) => {
+  try {
+    const { contactNo, enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+
+    if (!contactNo) {
+      return res.status(400).json({ success: false, error: 'contactNo (phone number) is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+
+    if (!user || !user.branch.dealerId || !user.branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    const branch = user.branch;
+
+    let token: string;
+    try {
+      token = await generateTVSToken(
+        branch.dealerId!,
+        branch.externalBranchId!,
+        user.externalRoleId!,
+        user.externalLoginId!,
+        user.externalUserId!,
+      );
+    } catch (tokenError: any) {
+      return res.status(502).json({ success: false, error: `TVS token generation failed: ${tokenError.message}` });
+    }
+
+    // Date range: 90 days back to 7 days ahead
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 90);
+    fromDate.setHours(5, 30, 0, 0);
+    const toDate = new Date();
+    toDate.setDate(toDate.getDate() + 7);
+    toDate.setHours(5, 30, 0, 0);
+
+    const requestBody = {
+      DEALER_ID: branch.dealerId,
+      BRANCH_ID: branch.externalBranchId,
+      BOOKING_DATE_FROM: fromDate.toISOString(),
+      BOOKING_DATE_TO: toDate.toISOString(),
+      BOOKING_ID: null,
+      CUST_NAME: null,
+      CONTACT_NO: String(contactNo),
+      COMBINE_ENQUIRYMODE_ID: '',
+    };
+
+    console.log('SearchBooking request:', JSON.stringify(requestBody));
+
+    const apiResponse = await axios.post(
+      'https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/SearchBooking',
+      requestBody,
+      {
+        headers: {
+          'Content-Type': 'application/json;charset=UTF-8',
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json, text/plain, */*',
+        },
+        timeout: 30000,
+      },
+    );
+
+    const responseData = apiResponse.data?.data || apiResponse.data || {};
+    const bookingList: any[] = responseData.BookingList || [];
+
+    console.log('SearchBooking: found', bookingList.length, 'booking(s)');
+
+    // Cache the response
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `search-booking-${enquiryId || contactNo}.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      contactNo,
+      enquiryId,
+      request: requestBody,
+      response: apiResponse.data,
+      fetchedAt: new Date().toISOString(),
+    }, null, 2), 'utf-8');
+
+    if (bookingList.length === 0) {
+      return res.json({ success: true, data: null, message: 'No bookings found for this phone number.' });
+    }
+
+    // Use the latest booking (sort by BOOKING_DATE desc, take first)
+    const sorted = [...bookingList].sort((a, b) => {
+      const da = new Date(a.BOOKING_DATE || 0).getTime();
+      const db = new Date(b.BOOKING_DATE || 0).getTime();
+      return db - da;
+    });
+    const latest = sorted[0];
+
+    res.json({
+      success: true,
+      data: {
+        bookingId: latest.BOOKING_ID || latest.BOOKING_NO || 0,
+        bookingNo: latest.BOOKING_NO || latest.BOOKING_ID || 0,
+        customerId: latest.CUSTOMER_ID || 0,
+        customerName: latest.CUST_NAME || '',
+        enquiryId: latest.ENQUIRY_ID || latest.ENQUIRY_NO || 0,
+        enquiryNo: latest.ENQUIRY_NO || latest.ENQUIRY_ID || 0,
+        statusDesc: latest.STATUS_DESC || '',
+        model: latest.MODEL || '',
+        color: latest.COLOR || '',
+        mobileNo: latest.MOBILE_NO || contactNo,
+        allotmentId: latest.Allotment_Id || 0,
+        bookingDate: latest.BOOKING_DATE || '',
+        bookedQty: latest.BOOKED_QTY || 0,
+        totalCount: bookingList.length,
+        raw: latest,
+      },
+      message: bookingList.length > 1
+        ? `Found ${bookingList.length} bookings. Using the latest one (${latest.BOOKING_NO}).`
+        : 'Booking details fetched successfully.',
+    });
+  } catch (error: any) {
+    console.error('SearchBooking error:', error?.response?.data || error.message);
+    if (error.response?.status) {
+      return res.status(error.response.status).json({
+        success: false,
+        error: `TVS API error (${error.response.status}): ${JSON.stringify(error.response.data?.message || error.response.data || 'Unknown error')}`,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to search bookings' });
   }
 };

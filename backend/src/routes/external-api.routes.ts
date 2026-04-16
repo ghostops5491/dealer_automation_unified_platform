@@ -9,6 +9,10 @@ import {
   setBookingLineItem,
   saveBooking,
   submitVoucher,
+  loadVehicleFrames,
+  performAllotment,
+  saveBookingAfterAllotment,
+  searchBooking,
   getCachedEnquiry,
   listCachedEnquiries,
   checkApiConfig,
@@ -57,6 +61,18 @@ router.post('/save-booking', requireRole('MANAGER', 'ASSOCIATE'), saveBooking);
 
 // Submit Voucher (constructs voucher from SaveBooking response + branch config)
 router.post('/submit-voucher', requireRole('MANAGER', 'ASSOCIATE'), submitVoucher);
+
+// Load vehicle frames (chassis numbers) for allotment dropdown
+router.post('/load-vehicle-frames', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), loadVehicleFrames);
+
+// Perform vehicle allotment (GetHoUnlockPDIDetails)
+router.post('/perform-allotment', requireRole('MANAGER', 'ASSOCIATE'), performAllotment);
+
+// Save booking after allotment (re-calls SaveBooking with ALLOTED_QTY=1, VEHICLE_ID, etc.)
+router.post('/save-booking-after-allotment', requireRole('MANAGER', 'ASSOCIATE'), saveBookingAfterAllotment);
+
+// Search bookings by phone number (BookedDetailsAwaitingAllotment)
+router.post('/search-booking', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), searchBooking);
 
 // Get cached enquiry data
 router.get('/enquiry-cache/:enquiryId', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), getCachedEnquiry);

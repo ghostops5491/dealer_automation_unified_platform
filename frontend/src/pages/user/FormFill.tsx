@@ -27,7 +27,7 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { useAuthStore } from '@/store/auth';
-import { flowApi, formApi, externalApi, vehicleCatalogApi } from '@/lib/api';
+import { flowApi, formApi, externalApi, vehicleCatalogApi, jobApi } from '@/lib/api';
 import { parseOptions, cn } from '@/lib/utils';
 import type { FormSubmission, ScreenField, FlowScreen } from '@/types';
 
@@ -266,7 +266,7 @@ export function FormFill() {
     }
   };
 
-  // Confirm Booking: Voucher(1st) → SaveBooking → Voucher(2nd)
+  // Confirm Booking (LEGACY — API path, detached from Perform Booking button)
   const handleConfirmBooking = async () => {
     if (!bookingConfirmData || !fetchedEnquiryNo) return;
     setShowBookingConfirm(false);
@@ -363,6 +363,148 @@ export function FormFill() {
       toast({ title: 'Booking failed', description: error.response?.data?.error || 'Failed to perform booking.', variant: 'destructive' });
     } finally {
       setPerformBookingLoading(false);
+    }
+  };
+
+  // Poll job runner until Playwright automation completes
+  const pollAutomationJob = async (jobId: string, maxAttempts = 120): Promise<'completed' | 'failed'> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const statusResp = await jobApi.getJobStatus(jobId);
+      const status = statusResp.data?.status;
+      if (status === 'completed') return 'completed';
+      if (status === 'failed') return 'failed';
+    }
+    return 'failed';
+  };
+
+  // Perform Booking via Playwright UI automation (replaces direct TVS POST APIs)
+  const handlePerformBookingViaAutomation = async () => {
+    if (!bookingAmount) {
+      toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details on Tab 1 first.', variant: 'destructive' });
+      return;
+    }
+
+    setPerformBookingLoading(true);
+    try {
+      toast({ title: 'Starting UI automation...', description: 'Headless browser is performing booking on TVS portal.' });
+      const startResp = await jobApi.runBooking({
+        enquiryNo: fetchedEnquiryNo,
+        bookingAmount,
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        setBookingSectionUnlocked(true);
+        toast({ title: 'Booking automation complete', description: 'Fetching booked details from TVS...' });
+        await handleSearchBooking();
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Booking automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright booking job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Perform booking automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run booking automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setPerformBookingLoading(false);
+    }
+  };
+
+  // Perform Allotment via Playwright UI automation (replaces direct TVS POST APIs)
+  const handlePerformAllotmentViaAutomation = async () => {
+    const vehicleData = formData['vehicle_details'] || {};
+    const selectedChassis = vehicleData.chassis_no;
+
+    if (!selectedChassis) {
+      toast({ title: 'No chassis selected', description: 'Please select a chassis number first.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
+      return;
+    }
+
+    setAllotmentLoading(true);
+    try {
+      toast({ title: 'Starting allotment automation...', description: 'Headless browser is performing allotment on TVS portal.' });
+      const startResp = await jobApi.runAllotment({
+        enquiryNo: fetchedEnquiryNo,
+        chassisNo: selectedChassis,
+        bookingNo: vehicleData.booking_no || '',
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        const selectedFrame = chassisOptions.find((f) => f.value === selectedChassis);
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          _allotmentDone: true,
+          _frameNumber: selectedChassis,
+          _engineNo: selectedFrame?.engineNo || vehicleData.engine_no || '',
+          chassis_no: selectedChassis,
+          engine_no: selectedFrame?.engineNo || vehicleData.engine_no || '',
+          key_no: selectedFrame?.keyNo || vehicleData.key_no || '',
+          battery_no: selectedFrame?.batteryNo || vehicleData.battery_no || '',
+        };
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: updatedVehicleDetails,
+        }));
+        await autoSaveVehicleDetails(updatedVehicleDetails);
+        toast({ title: 'Allotment automation complete', description: 'Vehicle allotment completed via TVS UI.' });
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Allotment automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright allotment job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Perform allotment automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run allotment automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setAllotmentLoading(false);
     }
   };
 
@@ -744,7 +886,7 @@ export function FormFill() {
     }
   };
 
-  // Perform vehicle allotment using selected chassis frame data
+  /* Perform vehicle allotment (LEGACY — API path, detached from button)
   const handlePerformAllotment = async () => {
     const vehicleData = formData['vehicle_details'] || {};
     const selectedChassis = vehicleData.chassis_no;
@@ -809,6 +951,7 @@ export function FormFill() {
       setAllotmentLoading(false);
     }
   };
+  */
 
   /* Save booking after allotment — hidden for now, kept for future use
   const handleSaveBookingAfterAllotment = async () => {
@@ -2119,66 +2262,7 @@ export function FormFill() {
                   />
                 </div>
                 <Button
-                  onClick={async () => {
-                    if (!bookingAmount) {
-                      toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
-                      return;
-                    }
-                    setPerformBookingLoading(true);
-                    try {
-                      const vehicleData = formData['vehicle_details'] || {};
-
-                      // Step 1: SetBookingLineItem — sets model/part on the booking
-                      toast({ title: 'Setting line item...', description: 'Configuring vehicle details on the booking.' });
-                      const lineItemResponse = await externalApi.setBookingLineItem({
-                        enquiryId: fetchedEnquiryNo!,
-                        partId: vehicleData._variantPartId || undefined,
-                        brand: vehicleData.brand,
-                        model: vehicleData.model,
-                        variant: vehicleData.variant,
-                      });
-
-                      if (!lineItemResponse.data.success) {
-                        toast({ title: 'Line item failed', description: lineItemResponse.data.error || 'Failed to set booking line item.', variant: 'destructive' });
-                        setPerformBookingLoading(false);
-                        return;
-                      }
-
-                      const rawData = lineItemResponse.data.data;
-                      const lineItemData = Array.isArray(rawData)
-                        ? rawData[0]
-                        : rawData;
-
-                      // requestPartData has pricing from pre-booking cache (reliable fallback)
-                      const rpd = lineItemResponse.data.requestPartData || {};
-
-                      // Use TVS response fields first, fall back to request part data
-                      const unitPrice = lineItemData?.UNIT_PRICE || rpd.UNIT_PRICE || 0;
-                      const exShrmPrice = lineItemData?.EX_SHRM_PRICE || rpd.EX_SHRM_PRICE || unitPrice;
-
-                      setBookingConfirmData({
-                        lineItemData,
-                        brand: vehicleData.brand || lineItemData?.BRAND_NAME || '',
-                        model: vehicleData.model || lineItemData?.MODEL_NAME || '',
-                        variant: vehicleData.variant || lineItemData?.VARIANT_NAME || '',
-                        quantity: lineItemData?.BOOKED_QTY || rpd.BOOKED_QTY || 1,
-                        unitPrice,
-                        exShowroomPrice: exShrmPrice,
-                        accCharges: lineItemData?.ACC_CHARGES || rpd.ACC_CHARGES || 0,
-                        discount: lineItemData?.DISC_VALUE || rpd.DISC_VALUE || 0,
-                        manualDiscount: lineItemData?.MANUAL_DISC || rpd.MANUAL_DISC || 0,
-                        regCharges: lineItemData?.REG_CHARGES || rpd.REG_CHARGES || 0,
-                        insCharges: lineItemData?.INS_CHARGES || rpd.INS_CHARGES || 0,
-                        bookingAmt: Number(bookingAmount),
-                      });
-                      setShowBookingConfirm(true);
-                    } catch (error: any) {
-                      console.error('SetBookingLineItem error:', error);
-                      toast({ title: 'Line item failed', description: error.response?.data?.error || 'Failed to set booking line item.', variant: 'destructive' });
-                    } finally {
-                      setPerformBookingLoading(false);
-                    }
-                  }}
+                  onClick={handlePerformBookingViaAutomation}
                   disabled={bookingSectionUnlocked || performBookingLoading}
                   className={cn(
                     "gap-2",
@@ -2190,7 +2274,7 @@ export function FormFill() {
                   {performBookingLoading ? (
                     <>
                       <RefreshCw className="h-4 w-4 animate-spin" />
-                      Processing...
+                      Running Automation...
                     </>
                   ) : bookingSectionUnlocked ? (
                     <>
@@ -2291,7 +2375,7 @@ export function FormFill() {
                   {/* Perform Allotment button — below RTO State */}
                   <div className="flex items-center gap-3 p-3 rounded-lg border bg-purple-50/50 mt-2">
                     <Button
-                      onClick={handlePerformAllotment}
+                      onClick={handlePerformAllotmentViaAutomation}
                       disabled={allotmentLoading || !(formData['vehicle_details']?.chassis_no) || chassisOptions.length === 0}
                       variant="outline"
                       className="gap-2 border-purple-500 text-purple-700 hover:bg-purple-50"

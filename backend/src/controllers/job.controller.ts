@@ -63,7 +63,7 @@ export const runJobForLastEntry = async (req: Request, res: Response) => {
 
 export const runBookingJob = async (req: Request, res: Response) => {
   try {
-    const { enquiryNo } = req.body;
+    const { enquiryNo, bookingAmount } = req.body;
     
     if (!enquiryNo) {
       return res.status(400).json({
@@ -73,10 +73,10 @@ export const runBookingJob = async (req: Request, res: Response) => {
     }
     
     console.log(`Forwarding run-booking request to job runner: ${JOB_RUNNER_URL}/jobs/run-booking`);
-    console.log(`Enquiry No: ${enquiryNo}`);
+    console.log(`Enquiry No: ${enquiryNo}, Booking Amount: ${bookingAmount ?? '(not set)'}`);
     
     const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-booking`, 
-      { enquiryNo },
+      { enquiryNo, bookingAmount },
       {
         timeout: 10000,
         headers: { 'Content-Type': 'application/json' }
@@ -98,6 +98,47 @@ export const runBookingJob = async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error.response?.data?.error || error.message || 'Failed to start booking job'
+    });
+  }
+};
+
+export const runAllotmentJob = async (req: Request, res: Response) => {
+  try {
+    const { enquiryNo, chassisNo, bookingNo } = req.body;
+
+    if (!enquiryNo) {
+      return res.status(400).json({
+        success: false,
+        error: 'enquiryNo is required'
+      });
+    }
+
+    console.log(`Forwarding run-allotment request to job runner: ${JOB_RUNNER_URL}/jobs/run-allotment`);
+    console.log(`Enquiry No: ${enquiryNo}, Chassis: ${chassisNo ?? '(not set)'}, Booking No: ${bookingNo ?? '(not set)'}`);
+
+    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-allotment`,
+      { enquiryNo, chassisNo, bookingNo },
+      {
+        timeout: 10000,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+
+    res.json(response.data);
+  } catch (error: any) {
+    console.error('Error calling job runner:', error.message);
+
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({
+        success: false,
+        error: 'Job Runner service is not running. Please start job_runner.py on your Windows machine.',
+        hint: 'Run: python C:\\Users\\yashc\\Desktop\\Auto_Unified_Platform\\job_runner\\job_runner.py'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: error.response?.data?.error || error.message || 'Failed to start allotment job'
     });
   }
 };

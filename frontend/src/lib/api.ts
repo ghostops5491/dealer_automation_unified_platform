@@ -301,11 +301,14 @@ export const uploadApi = {
   getFileInfo: (filepath: string) => api.get(`/upload/info/${encodeURIComponent(filepath)}`),
 };
 
-// Jobs (Robot Framework Automation)
+// Jobs (Robot Framework / Playwright Automation)
 export const jobApi = {
   runAllEntries: () => api.post('/jobs/run-all'),
   runLastEntry: () => api.post('/jobs/run-last'),
-  runBooking: (enquiryNo: string) => api.post('/jobs/run-booking', { enquiryNo }),
+  runBooking: (data: { enquiryNo: string; bookingAmount?: string | number }) =>
+    api.post('/jobs/run-booking', data),
+  runAllotment: (data: { enquiryNo: string; chassisNo?: string; bookingNo?: string }) =>
+    api.post('/jobs/run-allotment', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),
   runInsurance: (enquiryNo: string, submissionId?: string) => 
     api.post('/jobs/run-insurance', { enquiryNo, submissionId }),

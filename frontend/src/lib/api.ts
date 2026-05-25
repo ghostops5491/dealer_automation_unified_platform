@@ -305,10 +305,20 @@ export const uploadApi = {
 export const jobApi = {
   runAllEntries: () => api.post('/jobs/run-all'),
   runLastEntry: () => api.post('/jobs/run-last'),
-  runBooking: (data: { enquiryNo: string; bookingAmount?: string | number }) =>
-    api.post('/jobs/run-booking', data),
-  runAllotment: (data: { enquiryNo: string; chassisNo?: string; bookingNo?: string }) =>
-    api.post('/jobs/run-allotment', data),
+  runBooking: (data: {
+    enquiryNo: string;
+    bookingAmount?: string | number;
+    otp: string;
+    submodel: string;
+    vehicle: string;
+    headless?: boolean;
+  }) => api.post('/jobs/run-booking', data),
+  runAllotment: (data: {
+    enquiryNo: string;
+    chassisNo?: string;
+    bookingNo?: string;
+    headless?: boolean;
+  }) => api.post('/jobs/run-allotment', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),
   runInsurance: (enquiryNo: string, submissionId?: string) => 
     api.post('/jobs/run-insurance', { enquiryNo, submissionId }),
@@ -348,6 +358,9 @@ export const externalApi = {
     api.post('/external/save-booking-after-allotment', data),
   searchBooking: (data: { contactNo: string; enquiryId?: string }) =>
     api.post('/external/search-booking', data),
+  getFormatVehicleTemplateStatus: () => api.get('/external/format-vehicle-template/status'),
+  formatVehicleModel: (data: { action?: 'load'; group?: string; enquiryId?: string }) =>
+    api.post('/external/format-vehicle-model', data),
   getCachedEnquiry: (enquiryId: string) =>
     api.get(`/external/enquiry-cache/${enquiryId}`),
   listCachedEnquiries: () =>

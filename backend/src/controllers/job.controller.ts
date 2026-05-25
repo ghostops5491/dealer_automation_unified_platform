@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
+import { prisma } from '../lib/prisma';
+import { AuthRequest } from '../types';
 
 // Job Runner service URL (runs on Windows host machine)
 // When running in Docker, 'host.docker.internal' refers to the host machine
@@ -61,32 +63,73 @@ export const runJobForLastEntry = async (req: Request, res: Response) => {
   }
 };
 
-export const runBookingJob = async (req: Request, res: Response) => {
+export const runBookingJob = async (req: AuthRequest, res: Response) => {
   try {
-    const { enquiryNo, bookingAmount } = req.body;
-    
+    const { enquiryNo, bookingAmount, otp, vehicle, submodel, headless } = req.body;
+
     if (!enquiryNo) {
-      return res.status(400).json({
-        success: false,
-        error: 'enquiryNo is required'
-      });
+      return res.status(400).json({ success: false, error: 'enquiryNo is required' });
     }
-    
+    if (!otp) {
+      return res.status(400).json({ success: false, error: 'otp is required (configure TVS OTP on Dashboard)' });
+    }
+    if (!vehicle) {
+      return res.status(400).json({ success: false, error: 'vehicle (variant) is required' });
+    }
+    if (!submodel) {
+      return res.status(400).json({ success: false, error: 'submodel is required' });
+    }
+
+    const branchId = req.user?.branchId;
+    if (!branchId) {
+      return res.status(401).json({ success: false, error: 'Authenticated branch required' });
+    }
+
+    const branch = await prisma.branch.findUnique({
+      where: { id: branchId },
+      include: { fields: true },
+    });
+    if (!branch) {
+      return res.status(404).json({ success: false, error: 'Branch not found' });
+    }
+    if (!branch.dealerId) {
+      return res.status(400).json({ success: false, error: 'Branch.dealerId is not configured for this branch' });
+    }
+
+    const paymentMode =
+      branch.fields.find((f) => f.fieldName === 'PAYMENT_MODE_ID')?.fieldValue || '1';
+
+    const user = req.user?.id
+      ? await prisma.user.findUnique({ where: { id: req.user.id }, select: { externalRoleId: true } })
+      : null;
+    const roleId = user?.externalRoleId != null ? String(user.externalRoleId) : '3';
+
+    const payload = {
+      enquiryNo,
+      bookingAmount,
+      otp,
+      vehicle,
+      submodel,
+      dealerCode: String(branch.dealerId),
+      roleId,
+      branchName: branch.name,
+      paymentMode,
+      // Forward only if explicitly provided; otherwise job_runner falls back to its env default
+      ...(typeof headless === 'boolean' ? { headless } : {}),
+    };
+
     console.log(`Forwarding run-booking request to job runner: ${JOB_RUNNER_URL}/jobs/run-booking`);
-    console.log(`Enquiry No: ${enquiryNo}, Booking Amount: ${bookingAmount ?? '(not set)'}`);
-    
-    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-booking`, 
-      { enquiryNo, bookingAmount },
-      {
-        timeout: 10000,
-        headers: { 'Content-Type': 'application/json' }
-      }
-    );
-    
+    console.log('Payload:', { ...payload, otp: '[redacted]' });
+
+    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-booking`, payload, {
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
     res.json(response.data);
   } catch (error: any) {
     console.error('Error calling job runner:', error.message);
-    
+
     if (error.code === 'ECONNREFUSED') {
       return res.status(503).json({
         success: false,
@@ -94,7 +137,7 @@ export const runBookingJob = async (req: Request, res: Response) => {
         hint: 'Run: python C:\\Users\\yashc\\Desktop\\Auto_Unified_Platform\\job_runner\\job_runner.py'
       });
     }
-    
+
     res.status(500).json({
       success: false,
       error: error.response?.data?.error || error.message || 'Failed to start booking job'
@@ -104,7 +147,7 @@ export const runBookingJob = async (req: Request, res: Response) => {
 
 export const runAllotmentJob = async (req: Request, res: Response) => {
   try {
-    const { enquiryNo, chassisNo, bookingNo } = req.body;
+    const { enquiryNo, chassisNo, bookingNo, headless } = req.body;
 
     if (!enquiryNo) {
       return res.status(400).json({
@@ -114,10 +157,17 @@ export const runAllotmentJob = async (req: Request, res: Response) => {
     }
 
     console.log(`Forwarding run-allotment request to job runner: ${JOB_RUNNER_URL}/jobs/run-allotment`);
-    console.log(`Enquiry No: ${enquiryNo}, Chassis: ${chassisNo ?? '(not set)'}, Booking No: ${bookingNo ?? '(not set)'}`);
+    console.log(`Enquiry No: ${enquiryNo}, Chassis: ${chassisNo ?? '(not set)'}, Booking No: ${bookingNo ?? '(not set)'}, Headless: ${typeof headless === 'boolean' ? headless : '(default)'}`);
+
+    const allotmentPayload = {
+      enquiryNo,
+      chassisNo,
+      bookingNo,
+      ...(typeof headless === 'boolean' ? { headless } : {}),
+    };
 
     const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-allotment`,
-      { enquiryNo, chassisNo, bookingNo },
+      allotmentPayload,
       {
         timeout: 10000,
         headers: { 'Content-Type': 'application/json' }

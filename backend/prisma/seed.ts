@@ -672,13 +672,23 @@ async function main() {
       },
       {
         screenId: vehicleScreen.id,
+        name: 'submodel',
+        label: 'SubModel',
+        fieldType: 'SELECT',
+        isRequired: false,
+        placeholder: 'Select sub-model (TVS FormatVehicleModel)',
+        options: JSON.stringify([]),
+        sortOrder: 3,
+      },
+      {
+        screenId: vehicleScreen.id,
         name: 'variant',
         label: 'Variant',
         fieldType: 'SELECT',
         isRequired: true,
         placeholder: 'Select variant (depends on model)',
         options: JSON.stringify([]),
-        sortOrder: 3,
+        sortOrder: 4,
       },
       {
         screenId: vehicleScreen.id,
@@ -695,7 +705,7 @@ async function main() {
           { value: 'Hybrid', label: 'Hybrid' },
           { value: 'Electric', label: 'Electric' },
         ]),
-        sortOrder: 4,
+        sortOrder: 5,
       },
       // Other vehicle fields
       {
@@ -731,12 +741,57 @@ async function main() {
       },
       {
         screenId: vehicleScreen.id,
-        name: 'comments',
-        label: 'Comments',
-        fieldType: 'TEXTAREA',
-        placeholder: 'Enter any comments',
+        name: 'stock_available',
+        label: 'Stock Available',
+        fieldType: 'NUMBER',
+        placeholder: 'TVS booking-line stock count',
         isRequired: false,
         sortOrder: 9,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'ex_showroom_price',
+        label: 'Ex-Showroom Price',
+        fieldType: 'NUMBER',
+        placeholder: 'Ex-showroom price (before GST)',
+        isRequired: false,
+        sortOrder: 10,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'cgst_amount',
+        label: 'CGST',
+        fieldType: 'NUMBER',
+        placeholder: 'CGST amount',
+        isRequired: false,
+        sortOrder: 11,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'sgst_amount',
+        label: 'SGST',
+        fieldType: 'NUMBER',
+        placeholder: 'SGST amount',
+        isRequired: false,
+        sortOrder: 12,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'vehicle_total_price',
+        label: 'Vehicle Price',
+        fieldType: 'NUMBER',
+        placeholder: 'Ex-showroom + CGST + SGST',
+        isRequired: false,
+        sortOrder: 13,
+      },
+      {
+        screenId: vehicleScreen.id,
+        name: 'life_time_tax',
+        label: 'Life Time Tax',
+        fieldType: 'NUMBER',
+        placeholder: 'Life time tax',
+        isRequired: false,
+        sortOrder: 14,
       },
       {
         screenId: vehicleScreen.id,
@@ -745,7 +800,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'Enter key number',
         isRequired: false,
-        sortOrder: 10,
+        sortOrder: 15,
       },
       {
         screenId: vehicleScreen.id,
@@ -754,7 +809,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'Enter battery number',
         isRequired: false,
-        sortOrder: 11,
+        sortOrder: 16,
       },
       {
         screenId: vehicleScreen.id,
@@ -763,7 +818,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'Enter booking number',
         isRequired: false,
-        sortOrder: 12,
+        sortOrder: 17,
       },
       {
         screenId: vehicleScreen.id,
@@ -772,7 +827,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'From pre-booking data',
         isRequired: false,
-        sortOrder: 13,
+        sortOrder: 18,
       },
       {
         screenId: vehicleScreen.id,
@@ -781,7 +836,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'State shortform for RTO',
         isRequired: false,
-        sortOrder: 14,
+        sortOrder: 19,
       },
       {
         screenId: vehicleScreen.id,
@@ -795,7 +850,7 @@ async function main() {
     ],
   });
 
-  console.log('✅ Screen 3 created: Vehicle Details (14 fields, no colour)');
+  console.log('✅ Screen 3 created: Vehicle Details (19 fields, no colour)');
 
   // ============================================
   // SCREEN 4: Amounts & Tax

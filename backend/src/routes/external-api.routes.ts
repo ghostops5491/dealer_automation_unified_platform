@@ -17,13 +17,19 @@ import {
   listCachedEnquiries,
   checkApiConfig,
   generateToken,
-  clearTokenCache
+  clearTokenCache,
+  syncFormatVehicleTemplate,
+  getFormatVehicleTemplateStatus,
+  formatVehicleModel,
 } from '../controllers/external-api.controller';
 import { authenticate, requireRole } from '../middleware/auth';
 
 const router = Router();
 
-// All routes require authentication
+// Playwright automation sync (no JWT — uses X-Automation-Sync-Key)
+router.post('/format-vehicle-template/sync', syncFormatVehicleTemplate);
+
+// All routes below require authentication
 router.use(authenticate);
 
 // Check if API is configured for current user
@@ -73,6 +79,10 @@ router.post('/save-booking-after-allotment', requireRole('MANAGER', 'ASSOCIATE')
 
 // Search bookings by phone number (BookedDetailsAwaitingAllotment)
 router.post('/search-booking', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), searchBooking);
+
+// FormatVehicleModel — SubModel dropdown (uses template captured by Playwright)
+router.get('/format-vehicle-template/status', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), getFormatVehicleTemplateStatus);
+router.post('/format-vehicle-model', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), formatVehicleModel);
 
 // Get cached enquiry data
 router.get('/enquiry-cache/:enquiryId', requireRole('MANAGER', 'ASSOCIATE', 'INSURANCE_EXECUTIVE'), getCachedEnquiry);

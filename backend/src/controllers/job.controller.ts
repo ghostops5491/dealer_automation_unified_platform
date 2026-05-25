@@ -145,34 +145,63 @@ export const runBookingJob = async (req: AuthRequest, res: Response) => {
   }
 };
 
-export const runAllotmentJob = async (req: Request, res: Response) => {
+export const runAllotmentJob = async (req: AuthRequest, res: Response) => {
   try {
-    const { enquiryNo, chassisNo, bookingNo, headless } = req.body;
+    const { enquiryNo, chassisNo, bookingNo, submodel, vehicle, otp, headless } = req.body;
 
     if (!enquiryNo) {
-      return res.status(400).json({
-        success: false,
-        error: 'enquiryNo is required'
-      });
+      return res.status(400).json({ success: false, error: 'enquiryNo is required' });
+    }
+    if (!otp) {
+      return res.status(400).json({ success: false, error: 'otp is required (configure TVS OTP on Dashboard)' });
+    }
+    if (!vehicle) {
+      return res.status(400).json({ success: false, error: 'vehicle (variant) is required' });
+    }
+    if (!submodel) {
+      return res.status(400).json({ success: false, error: 'submodel is required' });
     }
 
-    console.log(`Forwarding run-allotment request to job runner: ${JOB_RUNNER_URL}/jobs/run-allotment`);
-    console.log(`Enquiry No: ${enquiryNo}, Chassis: ${chassisNo ?? '(not set)'}, Booking No: ${bookingNo ?? '(not set)'}, Headless: ${typeof headless === 'boolean' ? headless : '(default)'}`);
+    const branchId = req.user?.branchId;
+    if (!branchId) {
+      return res.status(401).json({ success: false, error: 'Authenticated branch required' });
+    }
 
-    const allotmentPayload = {
+    const branch = await prisma.branch.findUnique({
+      where: { id: branchId },
+    });
+    if (!branch) {
+      return res.status(404).json({ success: false, error: 'Branch not found' });
+    }
+    if (!branch.dealerId) {
+      return res.status(400).json({ success: false, error: 'Branch.dealerId is not configured for this branch' });
+    }
+
+    const user = req.user?.id
+      ? await prisma.user.findUnique({ where: { id: req.user.id }, select: { externalRoleId: true } })
+      : null;
+    const roleId = user?.externalRoleId != null ? String(user.externalRoleId) : '3';
+
+    const payload = {
       enquiryNo,
       chassisNo,
       bookingNo,
+      submodel,
+      vehicle,
+      otp,
+      dealerCode: String(branch.dealerId),
+      roleId,
+      branchName: branch.name,
       ...(typeof headless === 'boolean' ? { headless } : {}),
     };
 
-    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-allotment`,
-      allotmentPayload,
-      {
-        timeout: 10000,
-        headers: { 'Content-Type': 'application/json' }
-      }
-    );
+    console.log(`Forwarding run-allotment request to job runner: ${JOB_RUNNER_URL}/jobs/run-allotment`);
+    console.log('Payload:', { ...payload, otp: '[redacted]' });
+
+    const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-allotment`, payload, {
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' },
+    });
 
     res.json(response.data);
   } catch (error: any) {

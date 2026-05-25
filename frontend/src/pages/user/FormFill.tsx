@@ -509,6 +509,8 @@ export function FormFill() {
   const handlePerformAllotmentViaAutomation = async () => {
     const vehicleData = formData['vehicle_details'] || {};
     const selectedChassis = vehicleData.chassis_no;
+    const vehicleVariant = vehicleData._variantName || vehicleData.variant || '';
+    const vehicleSubmodel = vehicleData._submodelLabel || vehicleData.submodel || '';
 
     if (!selectedChassis) {
       toast({ title: 'No chassis selected', description: 'Please select a chassis number first.', variant: 'destructive' });
@@ -518,9 +520,47 @@ export function FormFill() {
       toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
       return;
     }
+    if (!vehicleData.booking_no) {
+      toast({ title: 'Booking number required', description: 'Complete Perform Booking first so booking_no is populated.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleVariant) {
+      toast({ title: 'Variant not selected', description: 'Pick a Variant on Screen 3 before performing allotment.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleSubmodel) {
+      toast({ title: 'SubModel not selected', description: 'Pick a SubModel on Screen 3 before performing allotment.', variant: 'destructive' });
+      return;
+    }
 
     setAllotmentLoading(true);
     try {
+      let otp = '';
+      try {
+        const otpResp = await otpConfigApi.getOtp();
+        otp = String(otpResp.data?.data?.tvs_otp ?? otpResp.data?.tvs_otp ?? '').trim();
+      } catch (otpErr: any) {
+        console.error('[Perform Allotment] OTP fetch failed:', otpErr);
+        const detail = otpErr.response?.data?.error || otpErr.message || 'Unknown error';
+        toast({
+          title: 'Could not read TVS OTP',
+          description: `${detail}. Check that job_runner.py is running and the OTP is set on Dashboard.`,
+          variant: 'destructive',
+        });
+        setAllotmentLoading(false);
+        return;
+      }
+
+      if (!otp) {
+        toast({
+          title: 'TVS OTP not set',
+          description: 'Set the TVS OTP on Dashboard before performing allotment.',
+          variant: 'destructive',
+        });
+        setAllotmentLoading(false);
+        return;
+      }
+
       toast({ title: 'Starting allotment automation...', description: 'Headless browser is performing allotment on TVS portal.' });
       const headlessPref = (() => {
         const stored = window.localStorage.getItem('tvs_automation_headless');
@@ -531,6 +571,9 @@ export function FormFill() {
         enquiryNo: fetchedEnquiryNo,
         chassisNo: selectedChassis,
         bookingNo: vehicleData.booking_no || '',
+        submodel: vehicleSubmodel,
+        vehicle: vehicleVariant,
+        otp,
         headless: headlessPref,
       });
 

@@ -317,6 +317,9 @@ export const jobApi = {
     enquiryNo: string;
     chassisNo?: string;
     bookingNo?: string;
+    submodel: string;
+    vehicle: string;
+    otp: string;
     headless?: boolean;
   }) => api.post('/jobs/run-allotment', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),

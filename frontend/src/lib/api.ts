@@ -121,6 +121,11 @@ export const branchApi = {
     api.post(`/branches/${id}/fields`, data),
   deleteField: (id: string, fieldId: string) =>
     api.delete(`/branches/${id}/fields/${fieldId}`),
+  getAutomationConfig: (id: string) => api.get(`/branches/${id}/automation-config`),
+  updateAutomationConfig: (
+    id: string,
+    data: { TVS_AUTOMATION_USER_ID?: string; TVS_AUTOMATION_PASSWORD?: string }
+  ) => api.put(`/branches/${id}/automation-config`, data),
 };
 
 // Users
@@ -320,6 +325,8 @@ export const jobApi = {
     submodel: string;
     vehicle: string;
     otp: string;
+    skipVehicleSelect?: boolean;
+    singleFrameStock?: boolean;
     headless?: boolean;
   }) => api.post('/jobs/run-allotment', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),

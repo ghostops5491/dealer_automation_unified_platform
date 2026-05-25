@@ -9,6 +9,10 @@ import {
   deleteBranchField,
   updateRoleTimeline,
 } from '../controllers/branch.controller';
+import {
+  getAutomationConfig,
+  updateAutomationConfig,
+} from '../controllers/automation-config.controller';
 import { authenticate, requireSuperAdmin } from '../middleware/auth';
 
 const router = Router();
@@ -29,6 +33,10 @@ router.delete('/:id/fields/:fieldId', deleteBranchField);
 
 // Timeline management
 router.put('/:id/timeline', updateRoleTimeline);
+
+// TVS Playwright automation credentials (per branch)
+router.get('/:id/automation-config', getAutomationConfig);
+router.put('/:id/automation-config', updateAutomationConfig);
 
 export default router;
 

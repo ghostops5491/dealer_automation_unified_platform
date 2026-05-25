@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2, Users as UsersIcon, Calendar, Key } from 'lucide-react';
+import { Plus, Pencil, Trash2, Users as UsersIcon, Calendar, Key, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -34,6 +34,7 @@ export function Users() {
   const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
   const [formData, setFormData] = useState({
     username: '',
     password: '',
@@ -126,6 +127,7 @@ export function Users() {
   });
 
   const openDialog = (user?: User) => {
+    setShowCreatePassword(false);
     if (user) {
       setEditingUser(user);
       setFormData({
@@ -167,6 +169,7 @@ export function Users() {
   const closeDialog = () => {
     setIsDialogOpen(false);
     setEditingUser(null);
+    setShowCreatePassword(false);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -306,7 +309,13 @@ export function Users() {
       )}
 
       {/* Create/Edit User Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+      <Dialog
+        open={isDialogOpen}
+        onOpenChange={(open) => {
+          if (open) setIsDialogOpen(true);
+          else closeDialog();
+        }}
+      >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{editingUser ? 'Edit User' : 'Create User'}</DialogTitle>
@@ -347,12 +356,28 @@ export function Users() {
                   </div>
                   <div className="space-y-2">
                     <Label>Password</Label>
-                    <Input
-                      type="password"
-                      value={formData.password}
-                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      required
-                    />
+                    <div className="relative">
+                      <Input
+                        type={showCreatePassword ? 'text' : 'password'}
+                        value={formData.password}
+                        onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                        className="pr-10"
+                        required
+                      />
+                      <button
+                        type="button"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        onClick={() => setShowCreatePassword((prev) => !prev)}
+                        aria-label={showCreatePassword ? 'Hide password' : 'Show password'}
+                        tabIndex={-1}
+                      >
+                        {showCreatePassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

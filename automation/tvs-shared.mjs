@@ -12,6 +12,13 @@ export const TVS_URL = process.env.TVS_URL || 'https://www.advantagetvs.in/LiteA
 export const TVS_USER_ID = process.env.TVS_USER_ID;
 export const TVS_PASSWORD = process.env.TVS_PASSWORD;
 
+/** Resolve TVS login credentials — CLI args from CRM take priority over .env fallback. */
+export function resolveTvsCredentials(args = {}) {
+  const userId = args['user-id'] || TVS_USER_ID;
+  const password = args.password || TVS_PASSWORD;
+  return { userId, password };
+}
+
 /** Parse `--key value` pairs from process.argv. */
 export function parseCliArgs(argv = process.argv) {
   return Object.fromEntries(
@@ -33,10 +40,10 @@ export function tvsPaymentModeOption(mode) {
 
 export async function tvsLogin(page, { dealerCode, branchName, userId, password, otp, roleId = '3' }) {
   await page.getByRole('textbox', { name: 'Dealer ID' }).fill(String(dealerCode));
-  await page.locator('select[name="branchName"]').selectOption({ label: branchName });
   await page.getByRole('textbox', { name: 'User ID' }).fill(userId);
   await page.getByRole('textbox', { name: 'Password' }).fill(password);
   await page.getByRole('textbox', { name: 'OTP' }).fill(String(otp));
+  await page.locator('select[name="branchName"]').selectOption({ label: branchName });
   await page.locator('select[name="roleId"]').selectOption(String(roleId));
   await page.getByRole('button', { name: 'login' }).evaluate((el) => el.click());
   console.log('[step] login submitted');
@@ -80,8 +87,10 @@ export async function tvsSearchAndModify(page, searchText, { submitWithEnter = f
   } else {
     await page.getByRole('button', { name: 'Search' }).click();
   }
-  await page.waitForTimeout(3000);
-  await page.locator('.datatable-row-right > .datatable-body-cell').click();
+  await page.waitForTimeout(2000);
+  const moreIcon = page.locator('.datatable-row-right div.more-icon[title="Click for more options"]').first();
+  await moreIcon.evaluate((el) => el.click());
+  console.log('[step] clicked row more-options icon');
   await page.getByRole('menuitem', { name: 'Modify' }).click();
   console.log(`[step] opened Modify for: ${searchText}`);
 }
@@ -124,32 +133,92 @@ export async function selectInlineBodyDropdown(page, selectIndex, labelText, fie
   console.log(`[step] selected ${fieldName}: ${labelText}`);
 }
 
-/** Try to pick chassis/frame in any inlineBody select or named input. */
-export async function selectChassisIfPresent(page, chassisNo) {
-  if (!chassisNo) return false;
+/** Remove existing frame, select chassis from VehStock dropdown, then Add Frame. */
+function frameLabelsMatch(a, b) {
+  const na = String(a).trim().toLowerCase();
+  const nb = String(b).trim().toLowerCase();
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
 
-  const norm = String(chassisNo).trim().toLowerCase();
-  const selects = page.locator('div.inlineBody select');
-  const count = await selects.count();
+async function readVehStockOptions(page) {
+  const vehStock = page.locator('select[name="VehStock"]');
+  await vehStock.waitFor({ state: 'visible', timeout: 15000 });
+  const options = await vehStock.locator('option').evaluateAll((els) =>
+    els
+      .map((el) => ({ value: el.value, text: (el.textContent || '').trim() }))
+      .filter((o) => o.value !== '-1' && o.text && !/^select$/i.test(o.text))
+  );
+  return { vehStock, options };
+}
 
-  for (let i = 0; i < count; i++) {
-    const optionLabels = await selects.nth(i).locator('option').allTextContents();
-    const matchIndex = optionLabels.findIndex((text) => text.trim().toLowerCase().includes(norm));
+async function selectFrameInVehStock(vehStock, optionLabels, frameNo) {
+  const norm = frameNo.toLowerCase();
+  let selected = false;
+
+  try {
+    await vehStock.selectOption({ label: frameNo });
+    selected = true;
+  } catch {
+    const matchIndex = optionLabels.findIndex((text) => {
+      const t = text.trim().toLowerCase();
+      return t === norm || t.includes(norm) || norm.includes(t);
+    });
     if (matchIndex >= 0) {
-      await selectInlineBodyDropdown(page, i, optionLabels[matchIndex].trim(), 'chassis');
-      return true;
+      const opt = vehStock.locator('option').nth(matchIndex);
+      const value = await opt.getAttribute('value');
+      if (value) {
+        await vehStock.selectOption(value);
+      } else {
+        await vehStock.selectOption({ index: matchIndex });
+      }
+      selected = true;
     }
   }
 
-  const frameInput = page.locator('input[name*="frame" i], input[name*="chassis" i]').first();
-  if (await frameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await frameInput.fill(String(chassisNo));
-    console.log(`[step] filled chassis input: ${chassisNo}`);
-    return true;
+  if (!selected) {
+    throw new Error(
+      `Could not select frame "${frameNo}" in VehStock dropdown. ` +
+        `Found ${optionLabels.length} option(s): ${optionLabels.slice(0, 8).join(' | ')}`
+    );
+  }
+}
+
+export async function selectChassisIfPresent(page, chassisNo, { singleFrame = false } = {}) {
+  if (!chassisNo) return false;
+
+  const frameNo = String(chassisNo).trim();
+  const { vehStock, options } = await readVehStockOptions(page);
+  const optionLabels = options.map((o) => o.text);
+
+  if (singleFrame && options.length === 1) {
+    const onlyFrame = options[0].text;
+    if (frameLabelsMatch(onlyFrame, frameNo)) {
+      console.log(
+        `[step] single-frame stock — VehStock "${onlyFrame}" matches selected chassis; skipping Remove/Add Frame`
+      );
+      return true;
+    }
+    console.warn(
+      `[step] single-frame soft-check mismatch: selected "${frameNo}", VehStock has "${onlyFrame}" — running full frame flow`
+    );
   }
 
-  console.log(`[step] chassis "${chassisNo}" not found in visible selects/inputs — continue manually if needed`);
-  return false;
+  await page.locator('button.completeJob').filter({ hasText: 'Remove Frame' }).click();
+  console.log('[step] clicked Remove Frame');
+  await page.waitForTimeout(500);
+
+  const { vehStock: vehStockAfter, options: optionsAfter } = await readVehStockOptions(page);
+  await selectFrameInVehStock(vehStockAfter, optionsAfter.map((o) => o.text), frameNo);
+  console.log(`[step] selected frame in VehStock: ${frameNo}`);
+
+  await page.locator('button.createJCBtn[type="submit"]').filter({ hasText: 'Add Frame' }).click();
+  console.log('[step] clicked Add Frame');
+
+  await page.waitForTimeout(500);
+  await page.locator('button.refereshJCBtn[type="button"]').filter({ hasText: 'Referesh' }).click();
+  console.log('[step] clicked Referesh');
+
+  return true;
 }
 
 export async function saveErrorScreenshot(page, prefix) {

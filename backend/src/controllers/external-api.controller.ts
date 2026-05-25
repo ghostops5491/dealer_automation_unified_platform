@@ -1481,22 +1481,10 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
     const unitPrice = findField('UNIT_PRICE');
     const exShrmPrice = findField('EX_SHRM_PRICE');
     const taxAmount = findField('TAX_AMOUNT');
-    const totalAmount = findField('TOTAL_AMOUNT');
-    const bookedQty = findField('BOOKED_QTY');
-    const pendingQty = findField('PENDING_QTY');
 
-    if (unitPrice !== undefined) mappedFields['amounts_tax.base_amount'] = unitPrice;
     if (exShrmPrice !== undefined) {
-      mappedFields['amounts_tax.ex_showroom_price'] = exShrmPrice;
       mappedFields['vehicle_details.ex_showroom_price'] = exShrmPrice;
     }
-    if (taxAmount !== undefined) mappedFields['amounts_tax.tax_amount'] = taxAmount;
-    if (totalAmount !== undefined) {
-      mappedFields['amounts_tax.total_amount'] = totalAmount;
-      mappedFields['vehicle_details.vehicle_total_price'] = totalAmount;
-    }
-    if (bookedQty !== undefined) mappedFields['amounts_tax.booked_qty'] = bookedQty;
-    if (pendingQty !== undefined) mappedFields['amounts_tax.pending_qty'] = pendingQty;
 
     // Extract CGST and SGST from tax details array
     const cgst = taxDetails.find((t: any) =>
@@ -1550,6 +1538,13 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
       mappedFields['vehicle_details.vehicle_total_price'] = parseFloat(
         (Number(exShrmPrice) + Number(taxAmount)).toFixed(2)
       );
+    }
+
+    const exShowroomInclGst = mappedFields['vehicle_details.vehicle_total_price'];
+    if (exShowroomInclGst !== undefined) {
+      mappedFields['amounts_tax.base_amount'] = exShowroomInclGst;
+    } else if (unitPrice !== undefined) {
+      mappedFields['amounts_tax.base_amount'] = unitPrice;
     }
 
     console.log('Pre-booking mappedFields:', JSON.stringify(mappedFields, null, 2));

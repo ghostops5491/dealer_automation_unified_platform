@@ -14,18 +14,19 @@
  *   --dealer-code  <dealer id>
  *   --role-id      <numeric roleId>   default "3"
  *   --branch       <branch name>
+ *   --user-id      <TVS user id>      from CRM branch config (fallback: .env TVS_USER_ID)
+ *   --password     <TVS password>     from CRM branch config (fallback: .env TVS_PASSWORD)
  *   --headless     <true|false>       default true
  *
- * .env: TVS_USER_ID, TVS_PASSWORD, optional TVS_URL
+ * .env fallback: TVS_USER_ID, TVS_PASSWORD, optional TVS_URL
  */
 import { chromium } from 'playwright';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   TVS_URL,
-  TVS_USER_ID,
-  TVS_PASSWORD,
   parseCliArgs,
+  resolveTvsCredentials,
   tvsLogin,
   tvsDismissCancel,
   tvsOpenSalesHome,
@@ -50,6 +51,10 @@ const dealerCode = args['dealer-code'];
 const roleId     = args['role-id'] || '3';
 const branchName = args.branch;
 const headless   = args.headless !== 'false';
+const skipVehicleSelect = args['skip-vehicle-select'] === 'true';
+const singleFrame = args['single-frame'] === 'true';
+
+const { userId: tvsUserId, password: tvsPassword } = resolveTvsCredentials(args);
 
 const searchKey = bookingNo || enquiryNo;
 
@@ -62,8 +67,8 @@ if (!vehicle)      missing.push('--vehicle');
 if (!otp)          missing.push('--otp');
 if (!dealerCode)   missing.push('--dealer-code');
 if (!branchName)   missing.push('--branch');
-if (!TVS_USER_ID)  missing.push('TVS_USER_ID (.env)');
-if (!TVS_PASSWORD) missing.push('TVS_PASSWORD (.env)');
+if (!tvsUserId)    missing.push('--user-id (or TVS_USER_ID in .env)');
+if (!tvsPassword)  missing.push('--password (or TVS_PASSWORD in .env)');
 if (missing.length) {
   console.error('[ERROR] Missing required values:', missing.join(', '));
   process.exit(1);
@@ -80,6 +85,8 @@ console.log(`  dealer    : ${dealerCode}`);
 console.log(`  branch    : ${branchName}`);
 console.log(`  role id   : ${roleId}`);
 console.log(`  headless  : ${headless}`);
+console.log(`  skip vehicle select : ${skipVehicleSelect}`);
+console.log(`  single frame stock  : ${singleFrame}`);
 console.log('='.repeat(60));
 
 const browser = await chromium.launch({ headless });
@@ -94,8 +101,8 @@ try {
   await tvsLogin(page, {
     dealerCode,
     branchName,
-    userId: TVS_USER_ID,
-    password: TVS_PASSWORD,
+    userId: tvsUserId,
+    password: tvsPassword,
     otp,
     roleId,
   });
@@ -109,8 +116,17 @@ try {
   await tvsSelectThisMonth(page);
   await tvsSearchAndModify(page, searchKey, { submitWithEnter: true });
 
+  if (skipVehicleSelect) {
+    console.log('[step] skipping SubModel/Variant select — unchanged since Perform Booking');
+  } else {
+    await selectInlineBodyDropdown(page, 0, submodel, 'submodel');
+    await page.waitForTimeout(500);
+    await selectInlineBodyDropdown(page, 1, vehicle, 'variant');
+    await page.waitForTimeout(500);
+  }
+
   const rowCheckbox = page.locator('#ROW_SELECT0');
-  if (await rowCheckbox.isVisible({ timeout: 5000 }).catch(() => false)) {
+  if (await rowCheckbox.isChecked({ timeout: 3000 }).catch(() => false)) {
     await rowCheckbox.evaluate((el) => el.click());
     console.log('[step] selected row checkbox (ROW_SELECT0)');
   } else {
@@ -118,11 +134,10 @@ try {
     console.log('[step] clicked Select label');
   }
 
-  await selectInlineBodyDropdown(page, 0, submodel, 'submodel');
-  await page.waitForTimeout(500);
-  await selectInlineBodyDropdown(page, 1, vehicle, 'variant');
-  await page.waitForTimeout(500);
-  await selectChassisIfPresent(page, chassisNo);
+  await page.locator('button.completeJob').filter({ hasText: 'Create Allotment' }).click();
+  console.log('[step] clicked Create Allotment');  
+
+  await selectChassisIfPresent(page, chassisNo, { singleFrame });
 
   page.once('dialog', (dialog) => {
     console.log(`[dialog] ${dialog.message()}`);
@@ -135,11 +150,7 @@ try {
     console.log('[step] clicked Save');
   }
 
-  const allotBtn = page.getByRole('button', { name: /Allot/i });
-  if (await allotBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await allotBtn.click();
-    console.log('[step] clicked Allot');
-  }
+  
 
   console.log('[SUCCESS] Allotment automation completed');
   process.exit(0);

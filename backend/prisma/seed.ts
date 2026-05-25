@@ -914,10 +914,11 @@ async function main() {
       {
         screenId: amountsScreen.id,
         name: 'base_amount',
-        label: 'Base Amount',
+        label: 'Ex Show Room Price incl GST',
         fieldType: 'NUMBER',
-        placeholder: 'Enter base amount',
+        placeholder: 'From Screen 3 — Vehicle Price + CGST + SGST',
         isRequired: true,
+        isReadOnly: true,
         sortOrder: 3,
       },
       {
@@ -932,9 +933,9 @@ async function main() {
       {
         screenId: amountsScreen.id,
         name: 'life_tax_amount',
-        label: 'Life Tax Amount',
+        label: 'Life Tax',
         fieldType: 'NUMBER',
-        placeholder: 'Auto-calculated',
+        placeholder: 'From Screen 3 — Life Tax',
         isRequired: false,
         isReadOnly: true,
         sortOrder: 5,
@@ -969,12 +970,21 @@ async function main() {
       },
       {
         screenId: amountsScreen.id,
-        name: 'ew_discount',
-        label: 'EW Discount',
+        name: 'accessories_amount',
+        label: 'Accessories Amount',
         fieldType: 'NUMBER',
-        placeholder: 'Enter EW discount',
+        placeholder: 'Enter accessories amount',
         isRequired: false,
         sortOrder: 9,
+      },
+      {
+        screenId: amountsScreen.id,
+        name: 'other_tax',
+        label: 'Other Tax',
+        fieldType: 'NUMBER',
+        placeholder: 'Enter other tax amount',
+        isRequired: false,
+        sortOrder: 10,
       },
       {
         screenId: amountsScreen.id,
@@ -992,7 +1002,7 @@ async function main() {
           { value: 'bajaj', label: 'Bajaj Finance' },
           { value: 'other', label: 'Other' },
         ]),
-        sortOrder: 10,
+        sortOrder: 11,
       },
       {
         screenId: amountsScreen.id,
@@ -1003,7 +1013,7 @@ async function main() {
         isRequired: false,
         validationRegex: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$',
         validationMessage: 'Please enter a valid GST number',
-        sortOrder: 11,
+        sortOrder: 12,
       },
       {
         screenId: amountsScreen.id,
@@ -1024,7 +1034,7 @@ async function main() {
           { value: 'ts10', label: 'TS10 - Kukatpally' },
           { value: 'other', label: 'Other' },
         ]),
-        sortOrder: 12,
+        sortOrder: 13,
       },
       {
         screenId: amountsScreen.id,
@@ -1033,7 +1043,7 @@ async function main() {
         fieldType: 'TEXT',
         placeholder: 'Enter charger number',
         isRequired: false,
-        sortOrder: 13,
+        sortOrder: 14,
       },
       {
         screenId: amountsScreen.id,
@@ -1042,7 +1052,7 @@ async function main() {
         fieldType: 'NUMBER',
         placeholder: 'Enter RTO fees amount',
         isRequired: false,
-        sortOrder: 14,
+        sortOrder: 15,
       },
       {
         screenId: amountsScreen.id,
@@ -1058,25 +1068,7 @@ async function main() {
           { value: 'rejected', label: 'Rejected' },
         ]),
         defaultValue: 'na',
-        sortOrder: 15,
-      },
-      {
-        screenId: amountsScreen.id,
-        name: 'ex_showroom_price',
-        label: 'EX ShowRoom Price',
-        fieldType: 'NUMBER',
-        placeholder: 'EX showroom price',
-        isRequired: false,
         sortOrder: 16,
-      },
-      {
-        screenId: amountsScreen.id,
-        name: 'tax_amount',
-        label: 'Tax Amount',
-        fieldType: 'NUMBER',
-        placeholder: 'Tax amount',
-        isRequired: false,
-        sortOrder: 17,
       },
       {
         screenId: amountsScreen.id,
@@ -1086,7 +1078,7 @@ async function main() {
         placeholder: 'CGST details',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 18,
+        sortOrder: 17,
       },
       {
         screenId: amountsScreen.id,
@@ -1096,30 +1088,12 @@ async function main() {
         placeholder: 'SGST details',
         isRequired: false,
         isReadOnly: true,
-        sortOrder: 19,
-      },
-      {
-        screenId: amountsScreen.id,
-        name: 'booked_qty',
-        label: 'Booked Qty',
-        fieldType: 'NUMBER',
-        placeholder: 'Booked quantity',
-        isRequired: false,
-        sortOrder: 20,
-      },
-      {
-        screenId: amountsScreen.id,
-        name: 'pending_qty',
-        label: 'Pending Qty',
-        fieldType: 'NUMBER',
-        placeholder: 'Pending quantity',
-        isRequired: false,
-        sortOrder: 21,
+        sortOrder: 18,
       },
     ],
   });
 
-  console.log('✅ Screen 4 created: Amounts & Tax (21 fields)');
+  console.log('✅ Screen 4 created: Amounts & Tax (18 fields)');
 
   // ============================================
   // SCREEN 5: Insurance, Nominee & Demographics
@@ -1520,7 +1494,7 @@ async function main() {
       {
         screenId: invoiceScreen.id,
         name: 'base_amount',
-        label: 'Base Amount',
+        label: 'Ex Show Room Price incl GST',
         fieldType: 'NUMBER',
         isRequired: false,
         isReadOnly: true,

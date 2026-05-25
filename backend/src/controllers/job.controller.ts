@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import axios from 'axios';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../types';
+import { getBranchAutomationCredentials } from './automation-config.controller';
 
 // Job Runner service URL (runs on Windows host machine)
 // When running in Docker, 'host.docker.internal' refers to the host machine
@@ -104,6 +105,17 @@ export const runBookingJob = async (req: AuthRequest, res: Response) => {
       : null;
     const roleId = user?.externalRoleId != null ? String(user.externalRoleId) : '3';
 
+    const automationCreds = await getBranchAutomationCredentials(branchId);
+    const tvsUserId = automationCreds.userId?.trim() || '';
+    const tvsPassword = automationCreds.password?.trim() || '';
+    if (!tvsUserId || !tvsPassword) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'TVS automation credentials are not configured for this branch. Super Admin must set TVS User ID and Password in Admin → Branches → Automation Settings.',
+      });
+    }
+
     const payload = {
       enquiryNo,
       bookingAmount,
@@ -114,12 +126,14 @@ export const runBookingJob = async (req: AuthRequest, res: Response) => {
       roleId,
       branchName: branch.name,
       paymentMode,
+      userId: tvsUserId,
+      password: tvsPassword,
       // Forward only if explicitly provided; otherwise job_runner falls back to its env default
       ...(typeof headless === 'boolean' ? { headless } : {}),
     };
 
     console.log(`Forwarding run-booking request to job runner: ${JOB_RUNNER_URL}/jobs/run-booking`);
-    console.log('Payload:', { ...payload, otp: '[redacted]' });
+    console.log('Payload:', { ...payload, otp: '[redacted]', password: '[redacted]' });
 
     const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-booking`, payload, {
       timeout: 10000,
@@ -147,7 +161,7 @@ export const runBookingJob = async (req: AuthRequest, res: Response) => {
 
 export const runAllotmentJob = async (req: AuthRequest, res: Response) => {
   try {
-    const { enquiryNo, chassisNo, bookingNo, submodel, vehicle, otp, headless } = req.body;
+    const { enquiryNo, chassisNo, bookingNo, submodel, vehicle, otp, headless, skipVehicleSelect, singleFrameStock } = req.body;
 
     if (!enquiryNo) {
       return res.status(400).json({ success: false, error: 'enquiryNo is required' });
@@ -182,6 +196,17 @@ export const runAllotmentJob = async (req: AuthRequest, res: Response) => {
       : null;
     const roleId = user?.externalRoleId != null ? String(user.externalRoleId) : '3';
 
+    const automationCreds = await getBranchAutomationCredentials(branchId);
+    const tvsUserId = automationCreds.userId?.trim() || '';
+    const tvsPassword = automationCreds.password?.trim() || '';
+    if (!tvsUserId || !tvsPassword) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'TVS automation credentials are not configured for this branch. Super Admin must set TVS User ID and Password in Admin → Branches → Automation Settings.',
+      });
+    }
+
     const payload = {
       enquiryNo,
       chassisNo,
@@ -192,11 +217,15 @@ export const runAllotmentJob = async (req: AuthRequest, res: Response) => {
       dealerCode: String(branch.dealerId),
       roleId,
       branchName: branch.name,
+      userId: tvsUserId,
+      password: tvsPassword,
+      ...(typeof skipVehicleSelect === 'boolean' ? { skipVehicleSelect } : {}),
+      ...(typeof singleFrameStock === 'boolean' ? { singleFrameStock } : {}),
       ...(typeof headless === 'boolean' ? { headless } : {}),
     };
 
     console.log(`Forwarding run-allotment request to job runner: ${JOB_RUNNER_URL}/jobs/run-allotment`);
-    console.log('Payload:', { ...payload, otp: '[redacted]' });
+    console.log('Payload:', { ...payload, otp: '[redacted]', password: '[redacted]' });
 
     const response = await axios.post(`${JOB_RUNNER_URL}/jobs/run-allotment`, payload, {
       timeout: 10000,

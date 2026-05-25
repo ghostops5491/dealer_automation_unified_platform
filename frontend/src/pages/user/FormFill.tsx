@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle, Key } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -55,6 +55,60 @@ function calcVehicleTotalFromParts(vd: Record<string, any>): number {
   return parseFloat((ex + cgst + sgst).toFixed(2));
 }
 
+function getExShowroomInclGstFromVehicle(vd: Record<string, any>): number {
+  const stored = vd.vehicle_total_price;
+  if (stored !== '' && stored != null && !Number.isNaN(parseFloat(String(stored)))) {
+    return parseFloat(String(stored));
+  }
+  return calcVehicleTotalFromParts(vd);
+}
+
+function calcAmountsScreenTotal(at: Record<string, any>, lifeTaxFromScreen3?: number): number {
+  const exInclGst = parseFloat(String(at.base_amount)) || 0;
+  const lifeTax =
+    lifeTaxFromScreen3 ?? (parseFloat(String(at.life_tax_amount)) || 0);
+  const other = parseFloat(String(at.other_amount)) || 0;
+  const discount = parseFloat(String(at.discount)) || 0;
+  const accessories =
+    parseFloat(String(at.accessories_amount ?? at.ew_discount)) || 0;
+  const otherTax = parseFloat(String(at.other_tax)) || 0;
+  return parseFloat(
+    (exInclGst + lifeTax + other - discount + accessories + otherTax).toFixed(2)
+  );
+}
+
+function buildSyncedAmountsTax(
+  vd: Record<string, any>,
+  at: Record<string, any> = {}
+): Record<string, any> {
+  const base = getExShowroomInclGstFromVehicle(vd);
+  const lifeTax = parseFloat(String(vd.life_time_tax)) || 0;
+  const merged = {
+    ...at,
+    base_amount: base,
+    life_tax_amount: lifeTax,
+  };
+  return {
+    ...merged,
+    total_amount: calcAmountsScreenTotal(merged, lifeTax),
+  };
+}
+
+const AMOUNTS_TOTAL_INPUT_FIELDS = [
+  'other_amount',
+  'discount',
+  'accessories_amount',
+  'other_tax',
+  'ew_discount',
+];
+
+const AMOUNTS_TAX_HIDDEN_FIELDS = [
+  'ex_showroom_price',
+  'tax_amount',
+  'booked_qty',
+  'pending_qty',
+];
+
 // Define which fields are cascading vehicle fields (Brand → Model → SubModel → Variant)
 const CASCADING_VEHICLE_FIELDS = ['brand', 'model', 'submodel', 'variant'];
 const VEHICLE_FIELD_DEPENDENCIES: Record<string, string[]> = {
@@ -85,6 +139,10 @@ export function FormFill() {
   const [fetchResults, setFetchResults] = useState<any[]>([]);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchedEnquiryNo, setFetchedEnquiryNo] = useState<string | null>(null);
+
+  // TVS OTP — shared with Dashboard via react-query cache key 'tvs-otp'
+  const [otpValue, setOtpValue] = useState('');
+  const [isUpdatingOtp, setIsUpdatingOtp] = useState(false);
   
   // Booking confirmation modal state
   const [showBookingConfirm, setShowBookingConfirm] = useState(false);
@@ -222,6 +280,48 @@ export function FormFill() {
       toast({ title: 'Error', description: error.response?.data?.error, variant: 'destructive' });
     },
   });
+
+  const { data: otpData } = useQuery({
+    queryKey: ['tvs-otp'],
+    queryFn: () => otpConfigApi.getOtp(),
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    const saved = otpData?.data?.data?.tvs_otp ?? otpData?.data?.tvs_otp ?? '';
+    if (saved) setOtpValue(String(saved));
+  }, [otpData]);
+
+  const updateOtpMutation = useMutation({
+    mutationFn: (otp: string) => otpConfigApi.updateOtp(otp),
+    onSuccess: (_data, otp) => {
+      toast({ title: 'OTP Updated', description: `TVS OTP set to ${otp}` });
+      setIsUpdatingOtp(false);
+      setOtpValue(otp);
+      queryClient.invalidateQueries({ queryKey: ['tvs-otp'] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Error',
+        description: error.response?.data?.error || 'Failed to update OTP',
+        variant: 'destructive',
+      });
+      setIsUpdatingOtp(false);
+    },
+  });
+
+  const handleOtpUpdate = () => {
+    if (!otpValue || !/^\d{4}$/.test(otpValue)) {
+      toast({
+        title: 'Invalid OTP',
+        description: 'OTP must be exactly 4 digits',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setIsUpdatingOtp(true);
+    updateOtpMutation.mutate(otpValue);
+  };
 
   // Fetch external enquiry details
   const handleFetchDetails = async () => {
@@ -401,7 +501,7 @@ export function FormFill() {
   };
 
   // Perform Booking via Playwright UI automation (replaces direct TVS POST APIs)
-  const handlePerformBookingViaAutomation = async () => {
+  const handlePerformBookingViaAutomation = async (options?: { requireStock?: boolean }) => {
     if (!bookingAmount) {
       toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
       return;
@@ -414,6 +514,19 @@ export function FormFill() {
     const vehicleData = formData['vehicle_details'] || {};
     const vehicleVariant = vehicleData._variantName || vehicleData.variant || '';
     const vehicleSubmodel = vehicleData._submodelLabel || vehicleData.submodel || '';
+
+    if (options?.requireStock) {
+      const stock = parseInt(String(vehicleData.stock_available ?? ''), 10);
+      if (!Number.isFinite(stock) || stock < 1) {
+        toast({
+          title: 'No stock available',
+          description: 'Vehicle stock must be 1 or more to perform booking with chassis.',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     if (!vehicleVariant) {
       toast({ title: 'Vehicle not selected', description: 'Pick a Brand / Model / Variant before performing booking.', variant: 'destructive' });
       return;
@@ -484,6 +597,17 @@ export function FormFill() {
         setBookingSectionUnlocked(true);
         toast({ title: 'Booking automation complete', description: 'Fetching booked details from TVS...' });
         await handleSearchBooking();
+        setFormData((prev: Record<string, any>) => {
+          const vehicle_details = {
+            ...(prev.vehicle_details || {}),
+            _bookingVehicleSnapshot: {
+              submodel: vehicleSubmodel,
+              variant: vehicleVariant,
+            },
+          };
+          void autoSaveVehicleDetails(vehicle_details);
+          return { ...prev, vehicle_details };
+        });
       } else {
         const statusResp = await jobApi.getJobStatus(jobId);
         toast({
@@ -567,6 +691,23 @@ export function FormFill() {
         return stored === null ? true : stored === 'true';
       })();
 
+      const normVehicleLabel = (v: string) => String(v).trim().toLowerCase();
+      const bookingSnap = vehicleData._bookingVehicleSnapshot as { submodel?: string; variant?: string } | undefined;
+      const skipVehicleSelect = !!(
+        bookingSnap &&
+        normVehicleLabel(bookingSnap.submodel || '') === normVehicleLabel(vehicleSubmodel) &&
+        normVehicleLabel(bookingSnap.variant || '') === normVehicleLabel(vehicleVariant)
+      );
+      const stockCount = parseInt(String(vehicleData.stock_available ?? ''), 10);
+      const singleFrameStock = stockCount === 1;
+
+      if (skipVehicleSelect) {
+        console.log('[Perform Allotment] SubModel/Variant unchanged since booking — skip vehicle select');
+      }
+      if (singleFrameStock) {
+        console.log('[Perform Allotment] single frame in stock — soft-check chassis only');
+      }
+
       const startResp = await jobApi.runAllotment({
         enquiryNo: fetchedEnquiryNo,
         chassisNo: selectedChassis,
@@ -574,6 +715,8 @@ export function FormFill() {
         submodel: vehicleSubmodel,
         vehicle: vehicleVariant,
         otp,
+        skipVehicleSelect,
+        singleFrameStock,
         headless: headlessPref,
       });
 
@@ -763,6 +906,11 @@ export function FormFill() {
           }
         }
 
+        newFormData['amounts_tax'] = buildSyncedAmountsTax(
+          newFormData['vehicle_details'] || {},
+          newFormData['amounts_tax'] || {}
+        );
+
         setFormData(newFormData);
 
         // Persist vehicle_details and amounts_tax to DB so they survive refresh
@@ -877,7 +1025,11 @@ export function FormFill() {
     if (submissionData?.data?.data && isInitialLoad) {
       const sub = submissionData.data.data;
       setSubmission(sub);
-      setFormData(sub.formData || {});
+      const fd = sub.formData || {};
+      setFormData({
+        ...fd,
+        amounts_tax: buildSyncedAmountsTax(fd['vehicle_details'] || {}, fd['amounts_tax'] || {}),
+      });
       // Restore fetchedEnquiryNo from saved form data
       const savedEnquiryNo = sub.formData?.customer_enquiry?.enquiry_no;
       if (savedEnquiryNo && !fetchedEnquiryNo) {
@@ -904,6 +1056,31 @@ export function FormFill() {
       setIsInitialLoad(false);
     }
   }, [submissionData, isInitialLoad]);
+
+  // Keep Screen 4 amounts in sync with Screen 3 pricing and life tax
+  useEffect(() => {
+    const vd = formData['vehicle_details'];
+    if (!vd || Object.keys(vd).length === 0) return;
+
+    setFormData((prev) => {
+      const synced = buildSyncedAmountsTax(vd, prev['amounts_tax'] || {});
+      const current = prev['amounts_tax'] || {};
+      if (
+        current.base_amount === synced.base_amount &&
+        current.life_tax_amount === synced.life_tax_amount &&
+        current.total_amount === synced.total_amount
+      ) {
+        return prev;
+      }
+      return { ...prev, amounts_tax: { ...current, ...synced } };
+    });
+  }, [
+    formData['vehicle_details']?.ex_showroom_price,
+    formData['vehicle_details']?.cgst_amount,
+    formData['vehicle_details']?.sgst_amount,
+    formData['vehicle_details']?.vehicle_total_price,
+    formData['vehicle_details']?.life_time_tax,
+  ]);
 
   // Start new submission
   useEffect(() => {
@@ -1410,11 +1587,21 @@ export function FormFill() {
       'registration_number': vehicleData.registration_type || '',
       
       // Invoice - Amount details
-      'base_amount': amountsData.base_amount || '',
+      'base_amount': amountsData.base_amount || getExShowroomInclGstFromVehicle(vehicleData) || '',
       'other_charges': amountsData.other_amount || '',
       'discount_amount': amountsData.discount || '',
-      'tax_amount': amountsData.life_tax_amount || '',
-      'total_amount': amountsData.total_amount || '',
+      'tax_amount': amountsData.life_tax_amount || vehicleData.life_time_tax || '',
+      'total_amount':
+        amountsData.total_amount ||
+        calcAmountsScreenTotal(
+          {
+            ...amountsData,
+            base_amount: amountsData.base_amount || getExShowroomInclGstFromVehicle(vehicleData),
+            life_tax_amount: amountsData.life_tax_amount || vehicleData.life_time_tax,
+          },
+          parseFloat(String(vehicleData.life_time_tax)) || 0
+        ) ||
+        '',
       'payment_mode': amountsData.payment_mode || '',
       
       // Invoice - Insurance details
@@ -1503,6 +1690,30 @@ export function FormFill() {
       }
     }
     
+    if (currentScreenCode === 'amounts_tax') {
+      const vd = formData['vehicle_details'] || {};
+      const at = formData['amounts_tax'] || {};
+      if (fieldName === 'base_amount') {
+        return getExShowroomInclGstFromVehicle(vd);
+      }
+      if (fieldName === 'life_tax_amount') {
+        return vd.life_time_tax ?? at.life_tax_amount ?? '';
+      }
+      if (fieldName === 'total_amount') {
+        return calcAmountsScreenTotal(
+          {
+            ...at,
+            base_amount: getExShowroomInclGstFromVehicle(vd),
+            life_tax_amount: vd.life_time_tax ?? at.life_tax_amount,
+          },
+          parseFloat(String(vd.life_time_tax)) || 0
+        );
+      }
+      if (fieldName === 'accessories_amount') {
+        return at.accessories_amount ?? at.ew_discount ?? '';
+      }
+    }
+    
     return formData[currentScreenCode]?.[fieldName] ?? '';
   };
 
@@ -1515,7 +1726,30 @@ export function FormFill() {
       setFormData((prev) => {
         const vd = { ...prev['vehicle_details'], [fieldName]: value };
         vd.vehicle_total_price = calcVehicleTotalFromParts(vd);
-        return { ...prev, vehicle_details: vd };
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
+      });
+      if (errors[fieldName]) {
+        setErrors((prev) => {
+          const newErrors = { ...prev };
+          delete newErrors[fieldName];
+          return newErrors;
+        });
+      }
+      return;
+    }
+
+    if (currentScreenCode === 'vehicle_details' && fieldName === 'life_time_tax') {
+      setFormData((prev) => {
+        const vd = { ...prev['vehicle_details'], life_time_tax: value };
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
       });
       if (errors[fieldName]) {
         setErrors((prev) => {
@@ -1528,10 +1762,14 @@ export function FormFill() {
     }
 
     if (currentScreenCode === 'vehicle_details' && fieldName === 'vehicle_total_price') {
-      setFormData((prev) => ({
-        ...prev,
-        vehicle_details: { ...prev['vehicle_details'], vehicle_total_price: value },
-      }));
+      setFormData((prev) => {
+        const vd = { ...prev['vehicle_details'], vehicle_total_price: value };
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
+      });
       if (errors[fieldName]) {
         setErrors((prev) => {
           const newErrors = { ...prev };
@@ -1630,6 +1868,18 @@ export function FormFill() {
           }
         }
       }
+    } else if (
+      currentScreenCode === 'amounts_tax' &&
+      AMOUNTS_TOTAL_INPUT_FIELDS.includes(fieldName)
+    ) {
+      setFormData((prev) => {
+        const vd = prev['vehicle_details'] || {};
+        const at = { ...prev['amounts_tax'], [fieldName]: value };
+        return {
+          ...prev,
+          amounts_tax: buildSyncedAmountsTax(vd, at),
+        };
+      });
     } else {
       setFormData((prev) => ({
         ...prev,
@@ -1887,6 +2137,7 @@ export function FormFill() {
   };
 
   const isFieldEditable = (field: ScreenField) => {
+    if (field.isReadOnly) return false;
     if (!canEdit) return false;
     const role = user?.role;
     if (role === 'MANAGER') return field.editableByManager;
@@ -2032,6 +2283,11 @@ export function FormFill() {
           </div>
         </div>
       );
+    }
+
+    // Legacy field removed from Screen 4 config
+    if (field.name === 'ew_discount' && currentScreenCode === 'amounts_tax') {
+      return null;
     }
 
     // Custom: CGST/SGST line — formatted display with cross-check validation
@@ -2552,15 +2808,69 @@ export function FormFill() {
     return <div className="text-center py-12">Flow not found</div>;
   }
 
+  const displayEnquiryId =
+    fetchedEnquiryNo ||
+    formData['customer_enquiry']?.enquiry_no ||
+    submission?.formData?.customer_enquiry?.enquiry_no ||
+    '';
+  const displayPhone =
+    formData['customer_enquiry']?.mobile_no ||
+    submission?.formData?.customer_enquiry?.mobile_no ||
+    '';
+
+  const vehicleDetailsData = formData['vehicle_details'] || {};
+  const stockAvailableCount = parseInt(String(vehicleDetailsData.stock_available ?? ''), 10);
+  const hasStockForBooking = Number.isFinite(stockAvailableCount) && stockAvailableCount >= 1;
+
   return (
-    <div className="page-enter space-y-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{flow.name}</h1>
-          <p className="text-muted-foreground">{flow.description}</p>
+    <div className="page-enter space-y-6 max-w-5xl mx-auto">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 print:hidden">
+        <div className="shrink-0 min-w-[10rem]">
+          <h1 className="text-2xl font-bold leading-tight">{flow.name}</h1>
+          <p className="text-sm text-muted-foreground">{flow.description}</p>
         </div>
+
+        <div className="flex flex-1 flex-wrap items-center justify-center gap-x-4 gap-y-2 min-w-[12rem] px-1">
+          <div className="flex items-center gap-1.5 text-sm whitespace-nowrap">
+            <span className="text-muted-foreground">Enquiry ID</span>
+            <span className="font-mono font-semibold">{displayEnquiryId || '—'}</span>
+          </div>
+          <span className="hidden sm:inline text-muted-foreground/40">|</span>
+          <div className="flex items-center gap-1.5 text-sm whitespace-nowrap">
+            <span className="text-muted-foreground">Phone</span>
+            <span className="font-mono font-medium">{displayPhone || '—'}</span>
+          </div>
+          <span className="hidden sm:inline text-muted-foreground/40">|</span>
+          <div className="flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
+            <Key className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+            <span className="text-xs font-medium text-amber-800">OTP</span>
+            <Input
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              placeholder="0000"
+              value={otpValue}
+              onChange={(e) => {
+                const value = e.target.value.replace(/\D/g, '').slice(0, 4);
+                setOtpValue(value);
+              }}
+              className="w-14 h-7 text-center font-mono text-xs px-1 bg-white"
+            />
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 px-2 text-xs bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={handleOtpUpdate}
+              disabled={isUpdatingOtp || !otpValue || otpValue.length !== 4}
+            >
+              {isUpdatingOtp ? '...' : 'Save'}
+            </Button>
+          </div>
+        </div>
+
         {submission && (
           <Badge className={cn(
+            'shrink-0 ml-auto',
             submission.status === 'DRAFT' && 'bg-gray-100 text-gray-800',
             submission.status === 'PENDING_APPROVAL' && 'bg-yellow-100 text-yellow-800',
             submission.status === 'APPROVED' && 'bg-green-100 text-green-800',
@@ -2841,7 +3151,7 @@ export function FormFill() {
                 </div>
               </div>
 
-              <div className="flex items-end gap-3 p-4 rounded-lg border border-blue-200 bg-blue-50/50">
+              <div className="flex flex-col sm:flex-row sm:items-end gap-3 p-4 rounded-lg border border-blue-200 bg-blue-50/50">
                 <div className="flex-1 max-w-xs">
                   <Label className="text-sm font-medium mb-1.5 block">Booking Amount</Label>
                   <Input
@@ -2852,33 +3162,69 @@ export function FormFill() {
                     disabled={bookingSectionUnlocked || performBookingLoading}
                   />
                 </div>
-                <Button
-                  onClick={handlePerformBookingViaAutomation}
-                  disabled={bookingSectionUnlocked || performBookingLoading}
-                  className={cn(
-                    "gap-2",
-                    bookingSectionUnlocked
-                      ? "bg-green-600 hover:bg-green-600 cursor-default"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  )}
-                >
-                  {performBookingLoading ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      Running Automation...
-                    </>
-                  ) : bookingSectionUnlocked ? (
-                    <>
-                      <Unlock className="h-4 w-4" />
-                      Booking Done
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="h-4 w-4" />
-                      Perform Booking
-                    </>
-                  )}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => handlePerformBookingViaAutomation()}
+                    disabled={bookingSectionUnlocked || performBookingLoading}
+                    className={cn(
+                      'gap-2',
+                      bookingSectionUnlocked
+                        ? 'bg-green-600 hover:bg-green-600 cursor-default'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    )}
+                  >
+                    {performBookingLoading ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        Running...
+                      </>
+                    ) : bookingSectionUnlocked ? (
+                      <>
+                        <Unlock className="h-4 w-4" />
+                        Booking Done
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-4 w-4" />
+                        Perform Booking without Stock
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    onClick={() => handlePerformBookingViaAutomation({ requireStock: true })}
+                    disabled={bookingSectionUnlocked || performBookingLoading || !hasStockForBooking}
+                    title={
+                      !hasStockForBooking
+                        ? 'Stock must be 1 or more (load frames after selecting Variant)'
+                        : undefined
+                    }
+                    className={cn(
+                      'gap-2',
+                      bookingSectionUnlocked
+                        ? 'bg-green-600 hover:bg-green-600 cursor-default'
+                        : hasStockForBooking
+                          ? 'bg-indigo-600 hover:bg-indigo-700'
+                          : ''
+                    )}
+                  >
+                    {performBookingLoading ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        Running...
+                      </>
+                    ) : bookingSectionUnlocked ? (
+                      <>
+                        <Unlock className="h-4 w-4" />
+                        Booking Done
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-4 w-4" />
+                        Perform Booking with Chasis
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
 
               {/* Post-booking fields — overlay temporarily disabled for testing */}
@@ -2994,6 +3340,11 @@ export function FormFill() {
           ) : (
             currentFields
               .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+              .filter(
+                (field: ScreenField) =>
+                  currentScreenCode !== 'amounts_tax' ||
+                  !AMOUNTS_TAX_HIDDEN_FIELDS.includes(field.name)
+              )
               .map((field: ScreenField) => renderField(field))
           )}
         </CardContent>

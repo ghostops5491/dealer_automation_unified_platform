@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import axios from 'axios';
+import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../types';
 
 interface ApiResponse {
@@ -11,15 +12,37 @@ interface ApiResponse {
 // Job Runner service URL (runs on Windows host machine)
 const JOB_RUNNER_URL = process.env.JOB_RUNNER_URL || 'http://host.docker.internal:3002';
 
+async function resolveDealerCode(req: AuthRequest): Promise<string | null> {
+  const branchId = req.user?.branchId;
+  if (!branchId) return null;
+
+  const branch = await prisma.branch.findUnique({
+    where: { id: branchId },
+    select: { dealerId: true },
+  });
+  if (!branch?.dealerId) return null;
+  return String(branch.dealerId);
+}
+
 /**
- * Get current OTP value from the job runner service
+ * Get current OTP value for the authenticated user's branch (keyed by Dealer ID).
  */
 export const getOtp = async (
   req: AuthRequest,
   res: Response<ApiResponse>
 ): Promise<void> => {
   try {
+    const dealerCode = await resolveDealerCode(req);
+    if (!dealerCode) {
+      res.status(400).json({
+        success: false,
+        error: 'Branch Dealer ID is not configured. Contact Super Admin.',
+      });
+      return;
+    }
+
     const response = await axios.get(`${JOB_RUNNER_URL}/otp`, {
+      params: { dealerCode },
       timeout: 5000,
     });
 
@@ -27,6 +50,7 @@ export const getOtp = async (
       success: true,
       data: {
         tvs_otp: response.data.tvs_otp || '',
+        dealerCode,
       },
     });
   } catch (error: any) {
@@ -48,7 +72,7 @@ export const getOtp = async (
 };
 
 /**
- * Update OTP value via the job runner service
+ * Update OTP for the authenticated user's branch (keyed by Dealer ID).
  */
 export const updateOtp = async (
   req: AuthRequest,
@@ -57,7 +81,6 @@ export const updateOtp = async (
   try {
     const { otp } = req.body;
 
-    // Validate OTP is exactly 4 digits
     if (!otp || !/^\d{4}$/.test(otp.toString())) {
       res.status(400).json({
         success: false,
@@ -66,9 +89,18 @@ export const updateOtp = async (
       return;
     }
 
+    const dealerCode = await resolveDealerCode(req);
+    if (!dealerCode) {
+      res.status(400).json({
+        success: false,
+        error: 'Branch Dealer ID is not configured. Contact Super Admin.',
+      });
+      return;
+    }
+
     const response = await axios.post(
       `${JOB_RUNNER_URL}/otp/update`,
-      { otp: otp.toString() },
+      { otp: otp.toString(), dealerCode },
       {
         timeout: 5000,
         headers: { 'Content-Type': 'application/json' },
@@ -81,6 +113,7 @@ export const updateOtp = async (
         data: {
           message: 'OTP updated successfully',
           tvs_otp: response.data.tvs_otp,
+          dealerCode,
         },
       });
     } else {

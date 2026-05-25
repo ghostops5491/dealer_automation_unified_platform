@@ -14,9 +14,11 @@
  *   --role-id      <numeric roleId>   default "3"
  *   --branch       <branch name>
  *   --payment-mode <numeric value>    default "1"
+ *   --user-id      <TVS user id>      from CRM branch config (fallback: .env TVS_USER_ID)
+ *   --password     <TVS password>     from CRM branch config (fallback: .env TVS_PASSWORD)
  *   --headless     <true|false>       default true
  *
- * .env: TVS_USER_ID, TVS_PASSWORD, optional TVS_URL, CRM_BACKEND_URL, AUTOMATION_SYNC_KEY
+ * .env fallback: TVS_USER_ID, TVS_PASSWORD, optional TVS_URL, CRM_BACKEND_URL, AUTOMATION_SYNC_KEY
  */
 import { chromium } from 'playwright';
 import path from 'path';
@@ -24,9 +26,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import {
   TVS_URL,
-  TVS_USER_ID,
-  TVS_PASSWORD,
   parseCliArgs,
+  resolveTvsCredentials,
   tvsPaymentModeOption,
   tvsLogin,
   tvsDismissCancel,
@@ -52,6 +53,8 @@ const branchName  = args.branch;
 const paymentMode = args['payment-mode'] || '1';
 const headless    = args.headless !== 'false';
 
+const { userId: tvsUserId, password: tvsPassword } = resolveTvsCredentials(args);
+
 const missing = [];
 if (!enquiryNo)    missing.push('--enquiry');
 if (!amount)       missing.push('--amount');
@@ -60,8 +63,8 @@ if (!vehicle)      missing.push('--vehicle');
 if (!submodel)     missing.push('--submodel');
 if (!dealerCode)   missing.push('--dealer-code');
 if (!branchName)   missing.push('--branch');
-if (!TVS_USER_ID)  missing.push('TVS_USER_ID (.env)');
-if (!TVS_PASSWORD) missing.push('TVS_PASSWORD (.env)');
+if (!tvsUserId)    missing.push('--user-id (or TVS_USER_ID in .env)');
+if (!tvsPassword)  missing.push('--password (or TVS_PASSWORD in .env)');
 if (missing.length) {
   console.error('[ERROR] Missing required values:', missing.join(', '));
   process.exit(1);
@@ -138,8 +141,8 @@ try {
   await tvsLogin(page, {
     dealerCode,
     branchName,
-    userId: TVS_USER_ID,
-    password: TVS_PASSWORD,
+    userId: tvsUserId,
+    password: tvsPassword,
     otp,
     roleId,
   });

@@ -53,12 +53,19 @@ during automation and:
 1. Overwrites `captured/format-vehicle-model-latest.json` locally
 2. Syncs to backend `POST /api/external/format-vehicle-template/sync`
 
-Optional `.env` entries:
+Optional `.env` entries (shared only — not branch secrets):
 
 ```
+TVS_URL=https://www.advantagetvs.in/LiteApp/session/signin
 CRM_BACKEND_URL=http://localhost:3001
 AUTOMATION_SYNC_KEY=crm-automation-sync
 ```
+
+Branch-specific **TVS User ID / Password** are configured in **Admin → Branches → TVS Automation Login** (stored in CRM DB).
+
+Branch-specific **OTP** is set on the user Dashboard (stored per Dealer ID in `otp-by-dealer.json` on the job runner host).
+
+Legacy `.env` `TVS_USER_ID`, `TVS_PASSWORD`, `TVS_OTP` still work as Playwright fallbacks for manual CLI testing.
 
 The CRM **SubModel** dropdown uses this template via `POST /api/external/format-vehicle-model`.
 Run booking automation at least once before SubModel options appear.

@@ -329,6 +329,18 @@ export const jobApi = {
     singleFrameStock?: boolean;
     headless?: boolean;
   }) => api.post('/jobs/run-allotment', data),
+  runInvoice: (data: {
+    enquiryNo?: string;
+    bookingNo: string;
+    otp: string;
+    userName: string;
+    addressLine1: string;
+    mobile: string;
+    dob?: string;
+    gender?: string;
+    language?: string;
+    headless?: boolean;
+  }) => api.post('/jobs/run-invoice', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),
   runInsurance: (enquiryNo: string, submissionId?: string) => 
     api.post('/jobs/run-insurance', { enquiryNo, submissionId }),

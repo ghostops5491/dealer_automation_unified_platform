@@ -10,6 +10,7 @@ clicked on **Screen 3 (Vehicle Details)** in the CRM frontend.
 |---|---|---|
 | `perform-booking.mjs`   | "Perform Booking" button   | `--enquiry`, `--amount`, `--headless` |
 | `perform-allotment.mjs` | "Perform Allotment" button | `--enquiry`, `--chassis`, `--booking`, `--headless` |
+| `perform-invoice.mjs`   | "Generate Invoice" button  | `--booking`, `--user-name`, `--mobile`, `--headless` |
 
 Both files are dummies right now - they launch headless Chromium, open the
 TVS sign-in page, and exit. Replace the `TODO` blocks with real UI steps.

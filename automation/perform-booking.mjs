@@ -169,6 +169,13 @@ try {
 
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await page.waitForTimeout(2000);
+  const bookingAmtInput = page.locator('input[name="BOOKING_AMT"]');
+  await bookingAmtInput.waitFor({ state: 'visible', timeout: 30000 });
+  await bookingAmtInput.fill(String(amount));
+  console.log(`[step] booking amount (BOOKING_AMT): ${amount}`);
+  await rowCheckbox.evaluate((el) => el.click());
+  console.log('[step] selected Vehicle row checkbox (ROW_SELECT0)');
+  await page.waitForTimeout(2000);
   await page.getByRole('button', { name: 'Create', exact: true }).click();
 
   const paymentModeOption = tvsPaymentModeOption(paymentMode);

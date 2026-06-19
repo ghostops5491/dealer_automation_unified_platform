@@ -1,5 +1,5 @@
 /**
- * Shared TVS DMS Playwright helpers for perform-booking.mjs and perform-allotment.mjs
+ * Shared TVS DMS Playwright helpers for perform-booking.mjs, perform-allotment.mjs, and perform-invoice.mjs
  */
 import dotenv from 'dotenv';
 import path from 'path';
@@ -215,9 +215,12 @@ export async function selectChassisIfPresent(page, chassisNo, { singleFrame = fa
   console.log('[step] clicked Add Frame');
 
   await page.waitForTimeout(500);
-  await page.locator('button.refereshJCBtn[type="button"]').filter({ hasText: 'Referesh' }).click();
-  console.log('[step] clicked Referesh');
+  const createBtn = page.locator('button.createJCBtn[type="submit"]').filter({ hasText: ' Create' });
+  await createBtn.last().waitFor({ state: 'visible' });
+  await createBtn.last().click();
+  console.log('[step] clicked Create');
 
+  await page.waitForTimeout(2000);
   return true;
 }
 

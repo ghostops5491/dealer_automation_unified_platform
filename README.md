@@ -184,6 +184,10 @@ crm/
 
 ## 🔧 Advanced Configuration
 
+For full production deployment steps (Docker CRM + Windows Playwright job runner), see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
+
+For complete system architecture, TVS API reference, Playwright details, and database schema, see **[SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md)**.
+
 ### Environment Variables
 
 Create a `.env` file in the root directory (for local development without Docker):

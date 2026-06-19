@@ -196,6 +196,7 @@ export function FormFill() {
   const [chassisOptions, setChassisOptions] = useState<{ value: string; label: string; engineNo: string; keyNo: string; batteryNo: string; vehicleId: number; noOfDays: number; color: string }[]>([]);
   const [chassisLoading, setChassisLoading] = useState(false);
   const [allotmentLoading, setAllotmentLoading] = useState(false);
+  const [generateInvoiceLoading, setGenerateInvoiceLoading] = useState(false);
   // const [saveBookingAfterAllotLoading, setSaveBookingAfterAllotLoading] = useState(false); // hidden for now
   const [selfManagedInsurance, setSelfManagedInsurance] = useState(false);
 
@@ -768,6 +769,126 @@ export function FormFill() {
       });
     } finally {
       setAllotmentLoading(false);
+    }
+  };
+
+  const handleGenerateInvoiceViaAutomation = async () => {
+    const customerData = formData['customer_enquiry'] || {};
+    const addressData = formData['address_and_details'] || {};
+    const vehicleData = formData['vehicle_details'] || {};
+    const invoiceData = formData['invoice'] || {};
+
+    const bookingNo = vehicleData.booking_no || '';
+    const userName =
+      invoiceData.customer_name ||
+      `${customerData.first_name || ''} ${customerData.last_name || ''}`.trim();
+    const addressLine1 = invoiceData.customer_address || addressData.address || '';
+    const mobile = invoiceData.customer_mobile || customerData.mobile_no || '';
+    const dob = customerData.dob || '';
+    const gender = (invoiceData.customer_gender || customerData.gender || 'male').toLowerCase();
+    const language = invoiceData.customer_language || customerData.language || '';
+
+    if (!bookingNo) {
+      toast({
+        title: 'Booking number required',
+        description: 'Complete Perform Booking first so booking_no is populated on Screen 3.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!userName) {
+      toast({ title: 'Customer name required', description: 'Customer name is missing from the form.', variant: 'destructive' });
+      return;
+    }
+    if (!addressLine1) {
+      toast({ title: 'Address required', description: 'Fill address on Screen 2 before generating invoice.', variant: 'destructive' });
+      return;
+    }
+    if (!mobile) {
+      toast({ title: 'Mobile number required', description: 'Customer mobile is missing from the form.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
+      return;
+    }
+
+    setGenerateInvoiceLoading(true);
+    try {
+      let otp = '';
+      try {
+        const otpResp = await otpConfigApi.getOtp();
+        otp = String(otpResp.data?.data?.tvs_otp ?? otpResp.data?.tvs_otp ?? '').trim();
+      } catch (otpErr: any) {
+        const detail = otpErr.response?.data?.error || otpErr.message || 'Unknown error';
+        toast({
+          title: 'Could not read TVS OTP',
+          description: `${detail}. Check that job_runner.py is running and the OTP is set on Dashboard.`,
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      if (!otp) {
+        toast({
+          title: 'TVS OTP not set',
+          description: 'Set the TVS OTP on Dashboard before generating invoice.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      toast({ title: 'Starting invoice automation...', description: 'Headless browser is generating invoice on TVS portal.' });
+      const headlessPref = (() => {
+        const stored = window.localStorage.getItem('tvs_automation_headless');
+        return stored === null ? true : stored === 'true';
+      })();
+
+      const startResp = await jobApi.runInvoice({
+        enquiryNo: fetchedEnquiryNo,
+        bookingNo,
+        otp,
+        userName,
+        addressLine1,
+        mobile,
+        dob,
+        gender,
+        language,
+        headless: headlessPref,
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        toast({ title: 'Invoice automation complete', description: 'Invoice form filled on TVS DMS.' });
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Invoice automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright invoice job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Generate invoice automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run invoice automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setGenerateInvoiceLoading(false);
     }
   };
 
@@ -3045,12 +3166,20 @@ export function FormFill() {
               <Button
                 variant="outline"
                 className="gap-2 border-orange-400 text-orange-700 hover:bg-orange-50"
-                onClick={() => {
-                  toast({ title: 'Invoice not generated', description: 'Invoice generation API is not linked yet.', variant: 'destructive' });
-                }}
+                disabled={generateInvoiceLoading}
+                onClick={handleGenerateInvoiceViaAutomation}
               >
-                <Play className="h-4 w-4" />
-                Generate Invoice
+                {generateInvoiceLoading ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    Generating Invoice...
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4" />
+                    Generate Invoice
+                  </>
+                )}
               </Button>
             )}
             {/* Fetch Pre Booking, Pre Fetch & Perform Booking - on vehicle_details screen */}

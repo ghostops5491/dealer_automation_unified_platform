@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2, GitBranch, Calendar, Users, MapPin } from 'lucide-react';
+import { Plus, Pencil, Trash2, GitBranch, Calendar, Users, MapPin, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -32,6 +32,7 @@ export function Branches() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [showAutomationPassword, setShowAutomationPassword] = useState(false);
   const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
   const [formData, setFormData] = useState({
     name: '',
@@ -51,6 +52,8 @@ export function Branches() {
     requiresApproval: true,
     allowAssociateJobs: false,
     isActive: true,
+    tvsAutomationUserId: '',
+    tvsAutomationPassword: '',
   });
 
   const { data: branchesData, isLoading } = useQuery({
@@ -111,6 +114,7 @@ export function Branches() {
   });
 
   const openDialog = (branch?: Branch) => {
+    setShowAutomationPassword(false);
     if (branch) {
       setEditingBranch(branch);
       setFormData({
@@ -131,7 +135,22 @@ export function Branches() {
         requiresApproval: branch.requiresApproval,
         allowAssociateJobs: (branch as any).allowAssociateJobs ?? false,
         isActive: branch.isActive,
+        tvsAutomationUserId: '',
+        tvsAutomationPassword: '',
       });
+      branchApi
+        .getAutomationConfig(branch.id)
+        .then((resp) => {
+          const data = resp.data?.data;
+          setFormData((prev) => ({
+            ...prev,
+            tvsAutomationUserId: data?.TVS_AUTOMATION_USER_ID || '',
+            tvsAutomationPassword: data?.TVS_AUTOMATION_PASSWORD || '',
+          }));
+        })
+        .catch(() => {
+          /* automation config optional until first save */
+        });
     } else {
       setEditingBranch(null);
       setFormData({
@@ -152,6 +171,8 @@ export function Branches() {
         requiresApproval: true,
         allowAssociateJobs: false,
         isActive: true,
+        tvsAutomationUserId: '',
+        tvsAutomationPassword: '',
       });
     }
     setIsDialogOpen(true);
@@ -160,25 +181,44 @@ export function Branches() {
   const closeDialog = () => {
     setIsDialogOpen(false);
     setEditingBranch(null);
+    setShowAutomationPassword(false);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const saveAutomationConfig = async (branchId: string) => {
+    if (!formData.tvsAutomationUserId && !formData.tvsAutomationPassword) return;
+    await branchApi.updateAutomationConfig(branchId, {
+      TVS_AUTOMATION_USER_ID: formData.tvsAutomationUserId,
+      TVS_AUTOMATION_PASSWORD: formData.tvsAutomationPassword,
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const { tvsAutomationUserId, tvsAutomationPassword, ...branchFields } = formData;
     const payload = {
-      ...formData,
-      address: formData.address || undefined,
-      invoiceAddress: formData.invoiceAddress || undefined,
-      externalBranchId: formData.externalBranchId ? Number(formData.externalBranchId) : undefined,
-      dealerId: formData.dealerId ? Number(formData.dealerId) : undefined,
-      managerValidUntil: formData.managerValidUntil || undefined,
-      associateValidUntil: formData.associateValidUntil || undefined,
-      viewerValidUntil: formData.viewerValidUntil || undefined,
-      insuranceExecutiveValidUntil: formData.insuranceExecutiveValidUntil || undefined,
+      ...branchFields,
+      address: branchFields.address || undefined,
+      invoiceAddress: branchFields.invoiceAddress || undefined,
+      externalBranchId: branchFields.externalBranchId ? Number(branchFields.externalBranchId) : undefined,
+      dealerId: branchFields.dealerId ? Number(branchFields.dealerId) : undefined,
+      managerValidUntil: branchFields.managerValidUntil || undefined,
+      associateValidUntil: branchFields.associateValidUntil || undefined,
+      viewerValidUntil: branchFields.viewerValidUntil || undefined,
+      insuranceExecutiveValidUntil: branchFields.insuranceExecutiveValidUntil || undefined,
     };
-    if (editingBranch) {
-      updateMutation.mutate({ id: editingBranch.id, data: payload });
-    } else {
-      createMutation.mutate(payload);
+    try {
+      if (editingBranch) {
+        await updateMutation.mutateAsync({ id: editingBranch.id, data: payload });
+        await saveAutomationConfig(editingBranch.id);
+      } else {
+        const response = await createMutation.mutateAsync(payload);
+        const newBranchId = response.data?.data?.id;
+        if (newBranchId) {
+          await saveAutomationConfig(newBranchId);
+        }
+      }
+    } catch {
+      /* mutation onError shows toast */
     }
   };
 
@@ -467,6 +507,60 @@ export function Branches() {
                     />
                   </div>
                 </div>
+              </div>
+
+              <div className="space-y-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
+                <h4 className="font-medium text-amber-900">TVS Automation Login</h4>
+                <p className="text-sm text-amber-800">
+                  Credentials for Playwright booking/allotment on the TVS portal. Stored per branch
+                  (identified by Dealer ID above) and passed at job runtime — not from automation/.env.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="tvsAutomationUserId">TVS User ID</Label>
+                    <Input
+                      id="tvsAutomationUserId"
+                      value={formData.tvsAutomationUserId}
+                      onChange={(e) =>
+                        setFormData({ ...formData, tvsAutomationUserId: e.target.value })
+                      }
+                      placeholder="e.g. admin"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="tvsAutomationPassword">TVS Password</Label>
+                    <div className="relative">
+                      <Input
+                        id="tvsAutomationPassword"
+                        type={showAutomationPassword ? 'text' : 'password'}
+                        value={formData.tvsAutomationPassword}
+                        onChange={(e) =>
+                          setFormData({ ...formData, tvsAutomationPassword: e.target.value })
+                        }
+                        placeholder="TVS DMS password"
+                        className="pr-10"
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        onClick={() => setShowAutomationPassword((prev) => !prev)}
+                        aria-label={showAutomationPassword ? 'Hide password' : 'Show password'}
+                        tabIndex={-1}
+                      >
+                        {showAutomationPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs text-amber-700">
+                  OTP is set separately by branch users on the Dashboard (stored per Dealer ID on the job runner).
+                </p>
               </div>
 
               <div className="space-y-4 p-4 rounded-lg bg-secondary/50">

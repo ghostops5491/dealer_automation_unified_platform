@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key, Trash2, Loader2, Settings, Save } from 'lucide-react';
+import { Workflow, FileText, Clock, CheckCircle2, XCircle, AlertCircle, Key, Trash2, Loader2, Settings, Save, Eye, EyeOff, Search } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -22,6 +22,36 @@ import { formatDateTime, getStatusColor } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import type { Flow, FormSubmission } from '@/types';
 
+type SubmissionSearchType = 'enquiry' | 'phone';
+
+function getSubmissionEnquiryNo(submission: FormSubmission): string {
+  const enquiry = submission.formData?.customer_enquiry as Record<string, unknown> | undefined;
+  return String(enquiry?.enquiry_no ?? '').trim();
+}
+
+function getSubmissionMobile(submission: FormSubmission): string {
+  const enquiry = submission.formData?.customer_enquiry as Record<string, unknown> | undefined;
+  return String(enquiry?.mobile_no ?? '').replace(/\D/g, '');
+}
+
+function submissionMatchesSearch(
+  submission: FormSubmission,
+  query: string,
+  searchType: SubmissionSearchType
+): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+
+  if (searchType === 'enquiry') {
+    return getSubmissionEnquiryNo(submission).includes(trimmed);
+  }
+
+  const queryDigits = trimmed.replace(/\D/g, '');
+  if (!queryDigits) return false;
+  const mobile = getSubmissionMobile(submission);
+  return mobile.includes(queryDigits);
+}
+
 export function UserDashboard() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
@@ -32,6 +62,45 @@ export function UserDashboard() {
   const [deleteTarget, setDeleteTarget] = useState<FormSubmission | null>(null);
   const [pbConfig, setPbConfig] = useState<Record<string, string>>({});
   const [pbConfigSaving, setPbConfigSaving] = useState(false);
+  const [submissionSearchQuery, setSubmissionSearchQuery] = useState('');
+  const [submissionSearchType, setSubmissionSearchType] = useState<SubmissionSearchType>('enquiry');
+  // Headless toggle for Playwright automation (persisted in localStorage).
+  // Default = true (headless) so nothing changes for existing users.
+  const [automationHeadless, setAutomationHeadless] = useState<boolean>(() => {
+    const stored = typeof window !== 'undefined' ? window.localStorage.getItem('tvs_automation_headless') : null;
+    return stored === null ? true : stored === 'true';
+  });
+
+  const toggleAutomationHeadless = () => {
+    setAutomationHeadless((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('tvs_automation_headless', String(next));
+      } catch {
+        // ignore localStorage failures (private mode, etc.)
+      }
+      toast({
+        title: next ? 'Headless mode' : 'Headed mode',
+        description: next
+          ? 'Automation will run without showing the browser.'
+          : 'Automation will open a visible browser window on the host.',
+      });
+      return next;
+    });
+  };
+
+  // Load currently saved OTP so the input reflects reality after refresh / on mount
+  const { data: otpData } = useQuery({
+    queryKey: ['tvs-otp'],
+    queryFn: () => otpConfigApi.getOtp(),
+    refetchOnWindowFocus: false,
+  });
+
+  // Sync fetched OTP into the input once it arrives (and after invalidation)
+  useEffect(() => {
+    const saved = otpData?.data?.data?.tvs_otp ?? otpData?.data?.tvs_otp ?? '';
+    if (saved) setOtpValue(String(saved));
+  }, [otpData]);
 
   // OTP mutation
   const updateOtpMutation = useMutation({
@@ -39,7 +108,8 @@ export function UserDashboard() {
     onSuccess: (_data, otp) => {
       toast({ title: 'OTP Updated', description: `TVS OTP set to ${otp}` });
       setIsUpdatingOtp(false);
-      setOtpValue('');
+      setOtpValue(otp);
+      queryClient.invalidateQueries({ queryKey: ['tvs-otp'] });
     },
     onError: (error: any) => {
       toast({
@@ -133,6 +203,19 @@ export function UserDashboard() {
   const approvedCount = stats.approved;
   const rejectedCount = stats.rejected;
 
+  const filteredSubmissions = useMemo(
+    () =>
+      submissions.filter((submission: FormSubmission) =>
+        submissionMatchesSearch(submission, submissionSearchQuery, submissionSearchType)
+      ),
+    [submissions, submissionSearchQuery, submissionSearchType]
+  );
+
+  const isSearching = submissionSearchQuery.trim().length > 0;
+  const recentSubmissions = isSearching
+    ? filteredSubmissions.slice(0, 20)
+    : filteredSubmissions.slice(0, 5);
+
   return (
     <div className="page-enter space-y-6">
       <div className="flex items-start justify-between">
@@ -168,6 +251,24 @@ export function UserDashboard() {
           >
             {isUpdatingOtp ? '...' : 'Update'}
           </Button>
+          {/* Headless / Headed automation toggle (subtle, icon-only) */}
+          <button
+            type="button"
+            onClick={toggleAutomationHeadless}
+            title={
+              automationHeadless
+                ? 'Automation: Headless (click to switch to Headed)'
+                : 'Automation: Headed (click to switch to Headless)'
+            }
+            aria-label="Toggle automation browser visibility"
+            className={`h-8 w-8 flex items-center justify-center rounded border text-xs transition-colors ${
+              automationHeadless
+                ? 'border-amber-200 text-amber-700 hover:bg-amber-100'
+                : 'border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100'
+            }`}
+          >
+            {automationHeadless ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
         </div>
       </div>
 
@@ -406,15 +507,61 @@ export function UserDashboard() {
               Recent Submissions
             </CardTitle>
             <CardDescription>Your latest form submissions</CardDescription>
+            <div className="pt-3 space-y-2">
+              <div className="inline-flex rounded-md border p-0.5 bg-muted/40">
+                <button
+                  type="button"
+                  onClick={() => setSubmissionSearchType('enquiry')}
+                  className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${
+                    submissionSearchType === 'enquiry'
+                      ? 'bg-background shadow-sm text-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Enquiry No
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSubmissionSearchType('phone')}
+                  className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${
+                    submissionSearchType === 'phone'
+                      ? 'bg-background shadow-sm text-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Phone
+                </button>
+              </div>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  value={submissionSearchQuery}
+                  onChange={(e) => setSubmissionSearchQuery(e.target.value)}
+                  placeholder={
+                    submissionSearchType === 'enquiry'
+                      ? 'Search by enquiry number...'
+                      : 'Search by phone number...'
+                  }
+                  className="pl-8 h-9"
+                />
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             {submissions.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-4">
                 No submissions yet
               </p>
+            ) : recentSubmissions.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No submissions match your search
+              </p>
             ) : (
               <div className="space-y-3">
-                {submissions.slice(0, 5).map((submission: FormSubmission) => (
+                {recentSubmissions.map((submission: FormSubmission) => {
+                  const enquiryNo = getSubmissionEnquiryNo(submission);
+                  const mobile = getSubmissionMobile(submission);
+                  return (
                   <div
                     key={submission.id}
                     className="flex items-center justify-between p-3 rounded-lg border hover:bg-secondary/50 transition-colors cursor-pointer"
@@ -424,6 +571,15 @@ export function UserDashboard() {
                       <p className="font-medium">{submission.flow?.name}</p>
                       <p className="text-xs text-muted-foreground">
                         {formatDateTime(submission.updatedAt)}
+                        {(enquiryNo || mobile) && (
+                          <>
+                            {' '}
+                            •{' '}
+                            {enquiryNo && `Enq: ${enquiryNo}`}
+                            {enquiryNo && mobile && ' • '}
+                            {mobile && `Ph: ${mobile}`}
+                          </>
+                        )}
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -445,8 +601,9 @@ export function UserDashboard() {
                       )}
                     </div>
                   </div>
-                ))}
-                {submissions.length > 5 && (
+                  );
+                })}
+                {!isSearching && submissions.length > 5 && (
                   <Button
                     variant="link"
                     className="w-full"

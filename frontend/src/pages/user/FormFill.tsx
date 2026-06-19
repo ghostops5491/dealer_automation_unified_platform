@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle, Key } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -27,18 +27,94 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { useAuthStore } from '@/store/auth';
-import { flowApi, formApi, externalApi, vehicleCatalogApi } from '@/lib/api';
+import { flowApi, formApi, externalApi, vehicleCatalogApi, jobApi, otpConfigApi } from '@/lib/api';
 import { parseOptions, cn } from '@/lib/utils';
 import type { FormSubmission, ScreenField, FlowScreen } from '@/types';
 
 // Fields that appear after "Perform Booking" action — locked behind overlay until booking is done
-const POST_BOOKING_FIELDS = ['registration_type', 'chassis_no', 'engine_no', 'key_no', 'battery_no', 'booking_no', 'customer_id', 'rto_state'];
+const POST_BOOKING_FIELDS = ['registration_type', 'key_no', 'battery_no', 'booking_no', 'customer_id', 'rto_state'];
 
-// Define which fields are cascading vehicle fields (Brand → Model → Variant)
-const CASCADING_VEHICLE_FIELDS = ['brand', 'model', 'variant'];
+// Chassis / engine — shown in pre-booking section (after pricing), loaded when Variant is selected
+const FRAME_SELECTION_FIELDS = ['chassis_no', 'engine_no'];
+
+// Rendered together in the vehicle pricing panel on Screen 3 (not as separate dynamic fields)
+const VEHICLE_PRICING_PANEL_FIELDS = [
+  'stock_available',
+  'ex_showroom_price',
+  'cgst_amount',
+  'sgst_amount',
+  'vehicle_total_price',
+  'gst_amount', // legacy — hidden if present in old screen config
+  'life_time_tax',
+];
+
+function calcVehicleTotalFromParts(vd: Record<string, any>): number {
+  const ex = parseFloat(String(vd.ex_showroom_price)) || 0;
+  const cgst = parseFloat(String(vd.cgst_amount)) || 0;
+  const sgst = parseFloat(String(vd.sgst_amount)) || 0;
+  return parseFloat((ex + cgst + sgst).toFixed(2));
+}
+
+function getExShowroomInclGstFromVehicle(vd: Record<string, any>): number {
+  const stored = vd.vehicle_total_price;
+  if (stored !== '' && stored != null && !Number.isNaN(parseFloat(String(stored)))) {
+    return parseFloat(String(stored));
+  }
+  return calcVehicleTotalFromParts(vd);
+}
+
+function calcAmountsScreenTotal(at: Record<string, any>, lifeTaxFromScreen3?: number): number {
+  const exInclGst = parseFloat(String(at.base_amount)) || 0;
+  const lifeTax =
+    lifeTaxFromScreen3 ?? (parseFloat(String(at.life_tax_amount)) || 0);
+  const other = parseFloat(String(at.other_amount)) || 0;
+  const discount = parseFloat(String(at.discount)) || 0;
+  const accessories =
+    parseFloat(String(at.accessories_amount ?? at.ew_discount)) || 0;
+  const otherTax = parseFloat(String(at.other_tax)) || 0;
+  return parseFloat(
+    (exInclGst + lifeTax + other - discount + accessories + otherTax).toFixed(2)
+  );
+}
+
+function buildSyncedAmountsTax(
+  vd: Record<string, any>,
+  at: Record<string, any> = {}
+): Record<string, any> {
+  const base = getExShowroomInclGstFromVehicle(vd);
+  const lifeTax = parseFloat(String(vd.life_time_tax)) || 0;
+  const merged = {
+    ...at,
+    base_amount: base,
+    life_tax_amount: lifeTax,
+  };
+  return {
+    ...merged,
+    total_amount: calcAmountsScreenTotal(merged, lifeTax),
+  };
+}
+
+const AMOUNTS_TOTAL_INPUT_FIELDS = [
+  'other_amount',
+  'discount',
+  'accessories_amount',
+  'other_tax',
+  'ew_discount',
+];
+
+const AMOUNTS_TAX_HIDDEN_FIELDS = [
+  'ex_showroom_price',
+  'tax_amount',
+  'booked_qty',
+  'pending_qty',
+];
+
+// Define which fields are cascading vehicle fields (Brand → Model → SubModel → Variant)
+const CASCADING_VEHICLE_FIELDS = ['brand', 'model', 'submodel', 'variant'];
 const VEHICLE_FIELD_DEPENDENCIES: Record<string, string[]> = {
   brand: [],
   model: ['brand'],
+  submodel: ['brand', 'model'],
   variant: ['brand', 'model'],
 };
 
@@ -63,6 +139,10 @@ export function FormFill() {
   const [fetchResults, setFetchResults] = useState<any[]>([]);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchedEnquiryNo, setFetchedEnquiryNo] = useState<string | null>(null);
+
+  // TVS OTP — shared with Dashboard via react-query cache key 'tvs-otp'
+  const [otpValue, setOtpValue] = useState('');
+  const [isUpdatingOtp, setIsUpdatingOtp] = useState(false);
   
   // Booking confirmation modal state
   const [showBookingConfirm, setShowBookingConfirm] = useState(false);
@@ -102,7 +182,6 @@ export function FormFill() {
   const [showModelId, setShowModelId] = useState(false);
   
   // Model parts fetch state
-  const [modelPartsLoading, setModelPartsLoading] = useState(false);
 
   // Booking section unlock state (for post-booking fields on vehicle_details screen)
   const [bookingSectionUnlocked, setBookingSectionUnlocked] = useState(false);
@@ -117,8 +196,8 @@ export function FormFill() {
   const [chassisOptions, setChassisOptions] = useState<{ value: string; label: string; engineNo: string; keyNo: string; batteryNo: string; vehicleId: number; noOfDays: number; color: string }[]>([]);
   const [chassisLoading, setChassisLoading] = useState(false);
   const [allotmentLoading, setAllotmentLoading] = useState(false);
+  const [generateInvoiceLoading, setGenerateInvoiceLoading] = useState(false);
   // const [saveBookingAfterAllotLoading, setSaveBookingAfterAllotLoading] = useState(false); // hidden for now
-  const [searchBookingLoading, setSearchBookingLoading] = useState(false);
   const [selfManagedInsurance, setSelfManagedInsurance] = useState(false);
 
   // Part ID visibility toggle (like Model ID)
@@ -128,10 +207,12 @@ export function FormFill() {
   const [vehicleCatalogOptions, setVehicleCatalogOptions] = useState<{
     brands: string[];
     models: string[];
+    submodels: { value: string; label: string }[];
     variants: { value: string; label: string; modelId: string; partIds: string[]; originalVariant: string }[];
   }>({
     brands: [],
     models: [],
+    submodels: [],
     variants: [],
   });
   const [catalogLoading, setCatalogLoading] = useState<Record<string, boolean>>({});
@@ -201,6 +282,48 @@ export function FormFill() {
     },
   });
 
+  const { data: otpData } = useQuery({
+    queryKey: ['tvs-otp'],
+    queryFn: () => otpConfigApi.getOtp(),
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    const saved = otpData?.data?.data?.tvs_otp ?? otpData?.data?.tvs_otp ?? '';
+    if (saved) setOtpValue(String(saved));
+  }, [otpData]);
+
+  const updateOtpMutation = useMutation({
+    mutationFn: (otp: string) => otpConfigApi.updateOtp(otp),
+    onSuccess: (_data, otp) => {
+      toast({ title: 'OTP Updated', description: `TVS OTP set to ${otp}` });
+      setIsUpdatingOtp(false);
+      setOtpValue(otp);
+      queryClient.invalidateQueries({ queryKey: ['tvs-otp'] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Error',
+        description: error.response?.data?.error || 'Failed to update OTP',
+        variant: 'destructive',
+      });
+      setIsUpdatingOtp(false);
+    },
+  });
+
+  const handleOtpUpdate = () => {
+    if (!otpValue || !/^\d{4}$/.test(otpValue)) {
+      toast({
+        title: 'Invalid OTP',
+        description: 'OTP must be exactly 4 digits',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setIsUpdatingOtp(true);
+    updateOtpMutation.mutate(otpValue);
+  };
+
   // Fetch external enquiry details
   const handleFetchDetails = async () => {
     if (!fetchSearchValue) {
@@ -266,7 +389,7 @@ export function FormFill() {
     }
   };
 
-  // Confirm Booking: Voucher(1st) → SaveBooking → Voucher(2nd)
+  // Confirm Booking (LEGACY — API path, detached from Perform Booking button)
   const handleConfirmBooking = async () => {
     if (!bookingConfirmData || !fetchedEnquiryNo) return;
     setShowBookingConfirm(false);
@@ -366,6 +489,409 @@ export function FormFill() {
     }
   };
 
+  // Poll job runner until Playwright automation completes
+  const pollAutomationJob = async (jobId: string, maxAttempts = 120): Promise<'completed' | 'failed'> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const statusResp = await jobApi.getJobStatus(jobId);
+      const status = statusResp.data?.status;
+      if (status === 'completed') return 'completed';
+      if (status === 'failed') return 'failed';
+    }
+    return 'failed';
+  };
+
+  // Perform Booking via Playwright UI automation (replaces direct TVS POST APIs)
+  const handlePerformBookingViaAutomation = async (options?: { requireStock?: boolean }) => {
+    if (!bookingAmount) {
+      toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details on Tab 1 first.', variant: 'destructive' });
+      return;
+    }
+
+    const vehicleData = formData['vehicle_details'] || {};
+    const vehicleVariant = vehicleData._variantName || vehicleData.variant || '';
+    const vehicleSubmodel = vehicleData._submodelLabel || vehicleData.submodel || '';
+
+    if (options?.requireStock) {
+      const stock = parseInt(String(vehicleData.stock_available ?? ''), 10);
+      if (!Number.isFinite(stock) || stock < 1) {
+        toast({
+          title: 'No stock available',
+          description: 'Vehicle stock must be 1 or more to perform booking with chassis.',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
+    if (!vehicleVariant) {
+      toast({ title: 'Vehicle not selected', description: 'Pick a Brand / Model / Variant before performing booking.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleSubmodel) {
+      toast({ title: 'SubModel not selected', description: 'Pick a SubModel before performing booking.', variant: 'destructive' });
+      return;
+    }
+
+    setPerformBookingLoading(true);
+    try {
+      let otp = '';
+      try {
+        const otpResp = await otpConfigApi.getOtp();
+        console.log('[Perform Booking] OTP fetch response:', otpResp.data);
+        otp = String(otpResp.data?.data?.tvs_otp ?? otpResp.data?.tvs_otp ?? '').trim();
+      } catch (otpErr: any) {
+        console.error('[Perform Booking] OTP fetch failed:', otpErr);
+        const detail = otpErr.response?.data?.error || otpErr.message || 'Unknown error';
+        toast({
+          title: 'Could not read TVS OTP',
+          description: `${detail}. Check that job_runner.py is running and the OTP is set on Dashboard.`,
+          variant: 'destructive',
+        });
+        setPerformBookingLoading(false);
+        return;
+      }
+
+      if (!otp) {
+        toast({
+          title: 'TVS OTP not set',
+          description: 'Set the TVS OTP on Dashboard before performing booking.',
+          variant: 'destructive',
+        });
+        setPerformBookingLoading(false);
+        return;
+      }
+      console.log('[Perform Booking] using OTP:', otp);
+
+      toast({ title: 'Starting UI automation...', description: 'Headless browser is performing booking on TVS portal.' });
+      const headlessPref = (() => {
+        const stored = window.localStorage.getItem('tvs_automation_headless');
+        return stored === null ? true : stored === 'true';
+      })();
+
+      const startResp = await jobApi.runBooking({
+        enquiryNo: fetchedEnquiryNo,
+        bookingAmount,
+        otp,
+        submodel: vehicleSubmodel,
+        vehicle: vehicleVariant,
+        headless: headlessPref,
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        setBookingSectionUnlocked(true);
+        toast({ title: 'Booking automation complete', description: 'Fetching booked details from TVS...' });
+        await handleSearchBooking();
+        setFormData((prev: Record<string, any>) => {
+          const vehicle_details = {
+            ...(prev.vehicle_details || {}),
+            _bookingVehicleSnapshot: {
+              submodel: vehicleSubmodel,
+              variant: vehicleVariant,
+            },
+          };
+          void autoSaveVehicleDetails(vehicle_details);
+          return { ...prev, vehicle_details };
+        });
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Booking automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright booking job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Perform booking automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run booking automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setPerformBookingLoading(false);
+    }
+  };
+
+  // Perform Allotment via Playwright UI automation (replaces direct TVS POST APIs)
+  const handlePerformAllotmentViaAutomation = async () => {
+    const vehicleData = formData['vehicle_details'] || {};
+    const selectedChassis = vehicleData.chassis_no;
+    const vehicleVariant = vehicleData._variantName || vehicleData.variant || '';
+    const vehicleSubmodel = vehicleData._submodelLabel || vehicleData.submodel || '';
+
+    if (!selectedChassis) {
+      toast({ title: 'No chassis selected', description: 'Please select a chassis number first.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleData.booking_no) {
+      toast({ title: 'Booking number required', description: 'Complete Perform Booking first so booking_no is populated.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleVariant) {
+      toast({ title: 'Variant not selected', description: 'Pick a Variant on Screen 3 before performing allotment.', variant: 'destructive' });
+      return;
+    }
+    if (!vehicleSubmodel) {
+      toast({ title: 'SubModel not selected', description: 'Pick a SubModel on Screen 3 before performing allotment.', variant: 'destructive' });
+      return;
+    }
+
+    setAllotmentLoading(true);
+    try {
+      let otp = '';
+      try {
+        const otpResp = await otpConfigApi.getOtp();
+        otp = String(otpResp.data?.data?.tvs_otp ?? otpResp.data?.tvs_otp ?? '').trim();
+      } catch (otpErr: any) {
+        console.error('[Perform Allotment] OTP fetch failed:', otpErr);
+        const detail = otpErr.response?.data?.error || otpErr.message || 'Unknown error';
+        toast({
+          title: 'Could not read TVS OTP',
+          description: `${detail}. Check that job_runner.py is running and the OTP is set on Dashboard.`,
+          variant: 'destructive',
+        });
+        setAllotmentLoading(false);
+        return;
+      }
+
+      if (!otp) {
+        toast({
+          title: 'TVS OTP not set',
+          description: 'Set the TVS OTP on Dashboard before performing allotment.',
+          variant: 'destructive',
+        });
+        setAllotmentLoading(false);
+        return;
+      }
+
+      toast({ title: 'Starting allotment automation...', description: 'Headless browser is performing allotment on TVS portal.' });
+      const headlessPref = (() => {
+        const stored = window.localStorage.getItem('tvs_automation_headless');
+        return stored === null ? true : stored === 'true';
+      })();
+
+      const normVehicleLabel = (v: string) => String(v).trim().toLowerCase();
+      const bookingSnap = vehicleData._bookingVehicleSnapshot as { submodel?: string; variant?: string } | undefined;
+      const skipVehicleSelect = !!(
+        bookingSnap &&
+        normVehicleLabel(bookingSnap.submodel || '') === normVehicleLabel(vehicleSubmodel) &&
+        normVehicleLabel(bookingSnap.variant || '') === normVehicleLabel(vehicleVariant)
+      );
+      const stockCount = parseInt(String(vehicleData.stock_available ?? ''), 10);
+      const singleFrameStock = stockCount === 1;
+
+      if (skipVehicleSelect) {
+        console.log('[Perform Allotment] SubModel/Variant unchanged since booking — skip vehicle select');
+      }
+      if (singleFrameStock) {
+        console.log('[Perform Allotment] single frame in stock — soft-check chassis only');
+      }
+
+      const startResp = await jobApi.runAllotment({
+        enquiryNo: fetchedEnquiryNo,
+        chassisNo: selectedChassis,
+        bookingNo: vehicleData.booking_no || '',
+        submodel: vehicleSubmodel,
+        vehicle: vehicleVariant,
+        otp,
+        skipVehicleSelect,
+        singleFrameStock,
+        headless: headlessPref,
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        const selectedFrame = chassisOptions.find((f) => f.value === selectedChassis);
+        const updatedVehicleDetails = {
+          ...formData['vehicle_details'],
+          _allotmentDone: true,
+          _frameNumber: selectedChassis,
+          _engineNo: selectedFrame?.engineNo || vehicleData.engine_no || '',
+          chassis_no: selectedChassis,
+          engine_no: selectedFrame?.engineNo || vehicleData.engine_no || '',
+          key_no: selectedFrame?.keyNo || vehicleData.key_no || '',
+          battery_no: selectedFrame?.batteryNo || vehicleData.battery_no || '',
+        };
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          vehicle_details: updatedVehicleDetails,
+        }));
+        await autoSaveVehicleDetails(updatedVehicleDetails);
+        toast({ title: 'Allotment automation complete', description: 'Vehicle allotment completed via TVS UI.' });
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Allotment automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright allotment job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Perform allotment automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run allotment automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setAllotmentLoading(false);
+    }
+  };
+
+  const handleGenerateInvoiceViaAutomation = async () => {
+    const customerData = formData['customer_enquiry'] || {};
+    const addressData = formData['address_and_details'] || {};
+    const vehicleData = formData['vehicle_details'] || {};
+    const invoiceData = formData['invoice'] || {};
+
+    const bookingNo = vehicleData.booking_no || '';
+    const userName =
+      invoiceData.customer_name ||
+      `${customerData.first_name || ''} ${customerData.last_name || ''}`.trim();
+    const addressLine1 = invoiceData.customer_address || addressData.address || '';
+    const mobile = invoiceData.customer_mobile || customerData.mobile_no || '';
+    const dob = customerData.dob || '';
+    const gender = (invoiceData.customer_gender || customerData.gender || 'male').toLowerCase();
+    const language = invoiceData.customer_language || customerData.language || '';
+
+    if (!bookingNo) {
+      toast({
+        title: 'Booking number required',
+        description: 'Complete Perform Booking first so booking_no is populated on Screen 3.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!userName) {
+      toast({ title: 'Customer name required', description: 'Customer name is missing from the form.', variant: 'destructive' });
+      return;
+    }
+    if (!addressLine1) {
+      toast({ title: 'Address required', description: 'Fill address on Screen 2 before generating invoice.', variant: 'destructive' });
+      return;
+    }
+    if (!mobile) {
+      toast({ title: 'Mobile number required', description: 'Customer mobile is missing from the form.', variant: 'destructive' });
+      return;
+    }
+    if (!fetchedEnquiryNo) {
+      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
+      return;
+    }
+
+    setGenerateInvoiceLoading(true);
+    try {
+      let otp = '';
+      try {
+        const otpResp = await otpConfigApi.getOtp();
+        otp = String(otpResp.data?.data?.tvs_otp ?? otpResp.data?.tvs_otp ?? '').trim();
+      } catch (otpErr: any) {
+        const detail = otpErr.response?.data?.error || otpErr.message || 'Unknown error';
+        toast({
+          title: 'Could not read TVS OTP',
+          description: `${detail}. Check that job_runner.py is running and the OTP is set on Dashboard.`,
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      if (!otp) {
+        toast({
+          title: 'TVS OTP not set',
+          description: 'Set the TVS OTP on Dashboard before generating invoice.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      toast({ title: 'Starting invoice automation...', description: 'Headless browser is generating invoice on TVS portal.' });
+      const headlessPref = (() => {
+        const stored = window.localStorage.getItem('tvs_automation_headless');
+        return stored === null ? true : stored === 'true';
+      })();
+
+      const startResp = await jobApi.runInvoice({
+        enquiryNo: fetchedEnquiryNo,
+        bookingNo,
+        otp,
+        userName,
+        addressLine1,
+        mobile,
+        dob,
+        gender,
+        language,
+        headless: headlessPref,
+      });
+
+      if (!startResp.data.success || !startResp.data.jobId) {
+        toast({
+          title: 'Automation failed to start',
+          description: startResp.data.error || startResp.data.hint || 'Job runner may not be running.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const jobId = startResp.data.jobId;
+      const result = await pollAutomationJob(jobId);
+
+      if (result === 'completed') {
+        toast({ title: 'Invoice automation complete', description: 'Invoice form filled on TVS DMS.' });
+      } else {
+        const statusResp = await jobApi.getJobStatus(jobId);
+        toast({
+          title: 'Invoice automation failed',
+          description: 'Check job runner logs for details.',
+          variant: 'destructive',
+        });
+        console.error('Playwright invoice job output:', statusResp.data?.output);
+      }
+    } catch (error: any) {
+      console.error('Generate invoice automation error:', error);
+      toast({
+        title: 'Automation error',
+        description: error.response?.data?.error || error.response?.data?.hint || 'Failed to run invoice automation.',
+        variant: 'destructive',
+      });
+    } finally {
+      setGenerateInvoiceLoading(false);
+    }
+  };
+
   // Fetch full enquiry details via PopulateEnquiryDetailsById and cache to file
   const handlePopulateEnquiry = async () => {
     if (!fetchedEnquiryNo) {
@@ -403,8 +929,10 @@ export function FormFill() {
       
       if (response.data.success) {
         const mapped = response.data.mappedFields || {};
+        const tvsCascade = response.data.tvsCascade;
         console.log('Pre-booking response data keys:', Object.keys(response.data.data || {}));
         console.log('Pre-booking mappedFields:', JSON.stringify(mapped, null, 2));
+        console.log('Pre-booking tvsCascade:', JSON.stringify(tvsCascade, null, 2));
         
         // Check if mappedFields is empty — means booking was already performed
         const dataFields = Object.keys(mapped).filter(k => !k.startsWith('_'));
@@ -427,8 +955,83 @@ export function FormFill() {
             newFormData[screenCode][fieldName] = value;
           }
         }
+
+        // Apply TVS Model → SubModel → Variant cascade from backend resolver
+        if (tvsCascade?.resolved && tvsCascade.cascade) {
+          const c = tvsCascade.cascade;
+          if (!newFormData['vehicle_details']) newFormData['vehicle_details'] = {};
+          newFormData['vehicle_details'] = {
+            ...newFormData['vehicle_details'],
+            brand: c.brand,
+            _tvsCatalogLoaded: true,
+            model: c.model,
+            submodel: c.submodel,
+            _submodelLabel: c.submodelLabel,
+            model_id: c.modelId,
+            variant: c.variant || newFormData['vehicle_details'].variant || '',
+            _variantPartId: c.partId || '',
+            _variantModelId: c.modelId,
+            _variantName: c.variant || '',
+            _partId: c.partId || '',
+          };
+
+          if (tvsCascade.catalogOptions) {
+            setVehicleCatalogOptions({
+              brands: ['TVS'],
+              models: (tvsCascade.catalogOptions.groups || []).map((g: { value: string }) => g.value),
+              submodels: (tvsCascade.catalogOptions.submodels || []).map((s: { value: string; label: string }) => ({
+                value: s.value,
+                label: s.label,
+              })),
+              variants: tvsCascade.catalogOptions.variants || [],
+            });
+          }
+        } else if (tvsCascade?.catalogOptions?.groups?.length) {
+          setVehicleCatalogOptions((prev) => ({
+            ...prev,
+            brands: ['TVS'],
+            models: tvsCascade.catalogOptions.groups.map((g: { value: string }) => g.value),
+          }));
+        }
         
+        // Store CGST/SGST metadata for cross-check validation (also persisted inside amounts_tax)
+        if (mapped['_cgst_perc'] !== undefined) {
+          setCgstMeta({ perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] });
+          if (!newFormData['amounts_tax']) newFormData['amounts_tax'] = {};
+          newFormData['amounts_tax']._cgstMeta = { perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] };
+          if (!newFormData['vehicle_details']) newFormData['vehicle_details'] = {};
+          newFormData['vehicle_details']._cgstPerc = mapped['_cgst_perc'];
+        }
+        if (mapped['_sgst_perc'] !== undefined) {
+          setSgstMeta({ perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] });
+          if (!newFormData['amounts_tax']) newFormData['amounts_tax'] = {};
+          newFormData['amounts_tax']._sgstMeta = { perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] };
+          if (!newFormData['vehicle_details']) newFormData['vehicle_details'] = {};
+          newFormData['vehicle_details']._sgstPerc = mapped['_sgst_perc'];
+        }
+
         console.log('Pre-booking updated formData:', JSON.stringify(newFormData, null, 2));
+
+        const resolvedPartId =
+          tvsCascade?.cascade?.partId ||
+          newFormData['vehicle_details']?._variantPartId ||
+          newFormData['vehicle_details']?._partId;
+
+        if (resolvedPartId) {
+          const framePatch = await loadFramesForPart(String(resolvedPartId), { toastOnResult: false });
+          if (framePatch && newFormData['vehicle_details']) {
+            newFormData['vehicle_details'] = {
+              ...newFormData['vehicle_details'],
+              ...framePatch,
+            };
+          }
+        }
+
+        newFormData['amounts_tax'] = buildSyncedAmountsTax(
+          newFormData['vehicle_details'] || {},
+          newFormData['amounts_tax'] || {}
+        );
+
         setFormData(newFormData);
 
         // Persist vehicle_details and amounts_tax to DB so they survive refresh
@@ -439,28 +1042,21 @@ export function FormFill() {
           await autoSaveTab('amounts_tax', newFormData['amounts_tax']);
         }
         
-        // Auto-fetch model parts if MODEL_ID is available to populate VehicleCatalog
-        const extractedModelId = newFormData['vehicle_details']?.model_id;
-        if (extractedModelId) {
-          handleFetchModelParts(extractedModelId);
-        }
-        
-        // Store CGST/SGST metadata for cross-check validation (also persisted inside amounts_tax)
-        if (mapped['_cgst_perc'] !== undefined) {
-          setCgstMeta({ perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] });
-          if (newFormData['amounts_tax']) {
-            newFormData['amounts_tax']._cgstMeta = { perc: mapped['_cgst_perc'], applied: mapped['_cgst_applied'], value: mapped['_cgst_value'] };
-          }
-        }
-        if (mapped['_sgst_perc'] !== undefined) {
-          setSgstMeta({ perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] });
-          if (newFormData['amounts_tax']) {
-            newFormData['amounts_tax']._sgstMeta = { perc: mapped['_sgst_perc'], applied: mapped['_sgst_applied'], value: mapped['_sgst_value'] };
-          }
-        }
-        
         setPreBookingDone(true);
-        toast({ title: 'Pre-booking data fetched & applied', description: 'Fields have been populated. Please verify.' });
+
+        const cascadeMsg = tvsCascade?.resolved
+          ? `Model: ${tvsCascade.cascade?.model}, SubModel and Variant auto-selected.`
+          : 'Amounts and IDs populated.';
+        const frameCount = newFormData['vehicle_details']?.stock_available;
+        const frameMsg =
+          resolvedPartId && frameCount !== undefined && frameCount !== ''
+            ? ` ${frameCount} frame(s) in stock.`
+            : '';
+        const warnMsg = tvsCascade?.warnings?.length ? ` Note: ${tvsCascade.warnings.join('; ')}` : '';
+        toast({
+          title: 'Pre-booking data fetched & applied',
+          description: `${cascadeMsg}${frameMsg} Please verify.${warnMsg}`,
+        });
       } else {
         toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
       }
@@ -468,48 +1064,6 @@ export function FormFill() {
       toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch pre-booking data', variant: 'destructive' });
     } finally {
       setPreBookingLoading(false);
-    }
-  };
-
-  // Fetch model parts from TVS API to populate VehicleCatalog (Brand → Model → Variant)
-  const handleFetchModelParts = async (modelIdOverride?: string) => {
-    const modelIdToUse = modelIdOverride || formData['vehicle_details']?.model_id;
-    if (!modelIdToUse) {
-      toast({ title: 'No Model ID', description: 'Model ID not available. Fetch pre-booking data first.', variant: 'destructive' });
-      return;
-    }
-    setModelPartsLoading(true);
-    try {
-      const response = await externalApi.fetchModelParts({ modelId: modelIdToUse, countryCode: 'IN' });
-      if (response.data.success) {
-        const { inserted, skipped, brands, models } = response.data.data;
-        toast({
-          title: 'Model parts loaded',
-          description: `${inserted} new variants added, ${skipped} already existed. Brands: ${brands?.join(', ')}, Models: ${models?.join(', ')}`,
-        });
-        // Reload the cascading options for brand
-        loadCascadingOptions('brand', formData['vehicle_details'] || {});
-        // If brand is "TVS" (default), auto-set it and load models
-        const vehicleData = formData['vehicle_details'] || {};
-        if (!vehicleData.brand && brands?.includes('TVS')) {
-          setFormData(prev => ({
-            ...prev,
-            vehicle_details: { ...prev['vehicle_details'], brand: 'TVS' },
-          }));
-          setTimeout(() => loadCascadingOptions('model', { brand: 'TVS' }), 300);
-        } else if (vehicleData.brand) {
-          loadCascadingOptions('model', vehicleData);
-          if (vehicleData.model) {
-            loadCascadingOptions('variant', vehicleData);
-          }
-        }
-      } else {
-        toast({ title: 'Error', description: response.data.error, variant: 'destructive' });
-      }
-    } catch (error: any) {
-      toast({ title: 'Error', description: error.response?.data?.error || 'Failed to fetch model parts', variant: 'destructive' });
-    } finally {
-      setModelPartsLoading(false);
     }
   };
 
@@ -592,7 +1146,11 @@ export function FormFill() {
     if (submissionData?.data?.data && isInitialLoad) {
       const sub = submissionData.data.data;
       setSubmission(sub);
-      setFormData(sub.formData || {});
+      const fd = sub.formData || {};
+      setFormData({
+        ...fd,
+        amounts_tax: buildSyncedAmountsTax(fd['vehicle_details'] || {}, fd['amounts_tax'] || {}),
+      });
       // Restore fetchedEnquiryNo from saved form data
       const savedEnquiryNo = sub.formData?.customer_enquiry?.enquiry_no;
       if (savedEnquiryNo && !fetchedEnquiryNo) {
@@ -620,6 +1178,31 @@ export function FormFill() {
     }
   }, [submissionData, isInitialLoad]);
 
+  // Keep Screen 4 amounts in sync with Screen 3 pricing and life tax
+  useEffect(() => {
+    const vd = formData['vehicle_details'];
+    if (!vd || Object.keys(vd).length === 0) return;
+
+    setFormData((prev) => {
+      const synced = buildSyncedAmountsTax(vd, prev['amounts_tax'] || {});
+      const current = prev['amounts_tax'] || {};
+      if (
+        current.base_amount === synced.base_amount &&
+        current.life_tax_amount === synced.life_tax_amount &&
+        current.total_amount === synced.total_amount
+      ) {
+        return prev;
+      }
+      return { ...prev, amounts_tax: { ...current, ...synced } };
+    });
+  }, [
+    formData['vehicle_details']?.ex_showroom_price,
+    formData['vehicle_details']?.cgst_amount,
+    formData['vehicle_details']?.sgst_amount,
+    formData['vehicle_details']?.vehicle_total_price,
+    formData['vehicle_details']?.life_time_tax,
+  ]);
+
   // Start new submission
   useEffect(() => {
     if (flowId && !submissionId && flowData?.data?.data) {
@@ -628,35 +1211,136 @@ export function FormFill() {
   }, [flowId, submissionId, flowData]);
 
   // Load cascading vehicle catalog options
+  const loadTvsCatalogGroups = async (preserveSelections = false) => {
+    setCatalogLoading(prev => ({ ...prev, tvs: true, model: true }));
+    try {
+      const response = await externalApi.formatVehicleModel({
+        action: 'load',
+        enquiryId: fetchedEnquiryNo || undefined,
+      });
+      if (response.data.success) {
+        const groups: Array<{ value: string; label: string }> = response.data.data?.groups || [];
+        setVehicleCatalogOptions(prev => ({
+          ...prev,
+          models: groups.map((g) => g.value),
+          ...(preserveSelections ? {} : { submodels: [], variants: [] }),
+        }));
+        setFormData(prev => ({
+          ...prev,
+          vehicle_details: {
+            ...prev['vehicle_details'],
+            brand: 'TVS',
+            _tvsCatalogLoaded: true,
+            ...(preserveSelections
+              ? {}
+              : {
+                  model: '',
+                  submodel: '',
+                  variant: '',
+                  _variantPartId: '',
+                  _variantModelId: '',
+                  _variantName: '',
+                  _submodelLabel: '',
+                }),
+          },
+        }));
+        return groups.length;
+      }
+      toast({
+        title: 'Failed to load TVS catalog',
+        description: response.data.error || 'Unknown error',
+        variant: 'destructive',
+      });
+      return 0;
+    } catch (error: any) {
+      const msg = error?.response?.data?.error || error.message || 'Request failed';
+      toast({
+        title: error?.response?.status === 404 ? 'Template not captured' : 'TVS catalog error',
+        description: msg,
+        variant: 'destructive',
+      });
+      return 0;
+    } finally {
+      setCatalogLoading(prev => ({ ...prev, tvs: false, model: false }));
+    }
+  };
+
+  const handleSelectTvs = async () => {
+    const count = await loadTvsCatalogGroups(false);
+    if (count > 0) {
+      toast({
+        title: 'TVS catalog loaded',
+        description: `${count} model group(s) ready — pick Model, then SubModel`,
+      });
+    }
+  };
+
   const loadCascadingOptions = async (fieldName: string, vehicleData: Record<string, any>) => {
     setCatalogLoading(prev => ({ ...prev, [fieldName]: true }));
     try {
       const brand = vehicleData?.brand || '';
       const model = vehicleData?.model || '';
+      const tvsCatalogLoaded = !!vehicleData?._tvsCatalogLoaded;
 
       if (fieldName === 'brand') {
         const response = await vehicleCatalogApi.getBrands();
-        setVehicleCatalogOptions(prev => ({ ...prev, brands: response.data.data || [] }));
+        const allBrands: string[] = response.data.data || [];
+        // Screen 3 only supports TVS bookings; hide any other brand from the dropdown.
+        const filtered = allBrands.filter((b) => b === 'TVS');
+        setVehicleCatalogOptions(prev => ({ ...prev, brands: filtered }));
       } else if (fieldName === 'model' && brand) {
+        if (tvsCatalogLoaded && brand === 'TVS') return;
         const response = await vehicleCatalogApi.getModels(brand);
         setVehicleCatalogOptions(prev => ({ ...prev, models: response.data.data || [] }));
+      } else if (fieldName === 'submodel' && brand && model) {
+        if (tvsCatalogLoaded && brand === 'TVS') {
+          const response = await externalApi.formatVehicleModel({ group: model });
+          if (response.data.success) {
+            const submodels: Array<{ value: string; label: string }> = response.data.data?.submodels || [];
+            setVehicleCatalogOptions(prev => ({
+              ...prev,
+              submodels: submodels.map((o) => ({ value: o.value, label: o.label })),
+            }));
+          } else {
+            setVehicleCatalogOptions(prev => ({ ...prev, submodels: [] }));
+          }
+        } else {
+          setVehicleCatalogOptions(prev => ({ ...prev, submodels: [] }));
+        }
       } else if (fieldName === 'variant' && brand && model) {
-        const response = await vehicleCatalogApi.getVariants(brand, model);
-        const rawVariants = response.data.data || [];
-        // Backend returns deduplicated objects { variant, label, modelId, partIds[] }
-        // Use composite key (modelId|||variant) as value to guarantee uniqueness
-        const mapped = rawVariants.map((v: any) =>
-          typeof v === 'string'
-            ? { value: v, label: v, modelId: '', partIds: [] as string[], originalVariant: v }
-            : {
-                value: `${v.modelId || ''}|||${v.variant || ''}`,
-                label: v.label || v.variant,
-                modelId: v.modelId || '',
-                partIds: v.partIds || (v.partId ? [v.partId] : []),
-                originalVariant: v.variant || '',
-              }
-        );
-        setVehicleCatalogOptions(prev => ({ ...prev, variants: mapped }));
+        if (tvsCatalogLoaded && brand === 'TVS') {
+          const modelId = vehicleData.submodel || vehicleData.model_id;
+          if (!modelId) return;
+          const response = await externalApi.fetchModelParts({ modelId: String(modelId), countryCode: 'IN' });
+          if (response.data.success) {
+            const rawVariants: Array<{
+              value: string;
+              label: string;
+              modelId: string;
+              partId: string;
+              partIds: string[];
+              originalVariant: string;
+            }> = response.data.data?.variants || [];
+            setVehicleCatalogOptions(prev => ({ ...prev, variants: rawVariants }));
+          } else {
+            setVehicleCatalogOptions(prev => ({ ...prev, variants: [] }));
+          }
+        } else {
+          const response = await vehicleCatalogApi.getVariants(brand, model);
+          const rawVariants = response.data.data || [];
+          const mapped = rawVariants.map((v: any) =>
+            typeof v === 'string'
+              ? { value: v, label: v, modelId: '', partIds: [] as string[], originalVariant: v }
+              : {
+                  value: `${v.modelId || ''}|||${v.variant || ''}`,
+                  label: v.label || v.variant,
+                  modelId: v.modelId || '',
+                  partIds: v.partIds || (v.partId ? [v.partId] : []),
+                  originalVariant: v.variant || '',
+                }
+          );
+          setVehicleCatalogOptions(prev => ({ ...prev, variants: mapped }));
+        }
       }
     } catch (error) {
       console.error(`Failed to load ${fieldName} options:`, error);
@@ -679,13 +1363,20 @@ export function FormFill() {
       
       // Load brands on initial load
       loadCascadingOptions('brand', vehicleData);
-      
-      // Load dependent options if values already exist
-      if (vehicleData.brand) {
+
+      if (vehicleData._tvsCatalogLoaded && vehicleData.brand === 'TVS') {
+        loadTvsCatalogGroups(true);
+        if (vehicleData.model) {
+          loadCascadingOptions('submodel', vehicleData);
+        }
+        if (vehicleData.submodel || vehicleData.model_id) {
+          loadCascadingOptions('variant', vehicleData);
+        }
+      } else if (vehicleData.brand && vehicleData.brand !== 'TVS') {
         loadCascadingOptions('model', vehicleData);
-      }
-      if (vehicleData.brand && vehicleData.model) {
-        loadCascadingOptions('variant', vehicleData);
+        if (vehicleData.model) {
+          loadCascadingOptions('variant', vehicleData);
+        }
       }
     }
   }, [currentTab, flowScreens.length]);
@@ -708,43 +1399,105 @@ export function FormFill() {
     }
   }, [currentTab, flowScreens.length]);
 
-  // Fetch chassis frames (vehicle frames) for allotment dropdown — triggered by button
-  const handleFetchChassis = async () => {
+  // Fetch chassis frames via LoadVehicleFrameforAllotment — auto on Variant select or manual refresh
+  const loadFramesForPart = async (
+    partId: string | undefined,
+    options?: { toastOnResult?: boolean },
+  ): Promise<{ stock_available: number; chassis_no: string; engine_no: string; _partId?: string } | null> => {
     if (!fetchedEnquiryNo) {
-      toast({ title: 'No enquiry number', description: 'Fetch enquiry details first.', variant: 'destructive' });
-      return;
+      if (options?.toastOnResult !== false) {
+        toast({ title: 'No enquiry number', description: 'Fetch enquiry details on Tab 1 first.', variant: 'destructive' });
+      }
+      return null;
     }
+    if (!partId) {
+      setChassisOptions([]);
+      return null;
+    }
+
     setChassisLoading(true);
     try {
-      const vehicleData = formData['vehicle_details'] || {};
       const resp = await externalApi.loadVehicleFrames({
         enquiryId: fetchedEnquiryNo,
-        partId: vehicleData._partId || vehicleData._variantPartId || undefined,
+        partId,
       });
-      if (resp.data.success && resp.data.data?.length > 0) {
-        setChassisOptions(resp.data.data.map((f: any) => ({
-              value: f.value || '',
-              label: f.label || f.value || '',
-              engineNo: f.engineNo || '',
-              keyNo: f.keyNo || '',
-              batteryNo: f.batteryNo || '',
-              vehicleId: f.vehicleId || 0,
-              noOfDays: f.noOfDays || 0,
-              color: f.description || '',
-            })));
-        toast({ title: `${resp.data.count} chassis number(s) available`, description: `${resp.data.availableQty || resp.data.count} vehicles in stock. Select from dropdown.` });
-      } else {
-        toast({ title: 'No chassis numbers available', description: 'No vehicle frames found for allotment.', variant: 'destructive' });
+      const frames: any[] = resp.data.data || [];
+      const count = frames.length;
+
+      const mappedFrames = frames.map((f: any) => ({
+        value: f.value || '',
+        label: f.engineNo
+          ? `${f.value} — Engine: ${f.engineNo}`
+          : (f.label || f.value || ''),
+        engineNo: f.engineNo || '',
+        keyNo: f.keyNo || '',
+        batteryNo: f.batteryNo || '',
+        vehicleId: f.vehicleId || 0,
+        noOfDays: f.noOfDays || 0,
+        color: f.description || '',
+      }));
+
+      setChassisOptions(mappedFrames);
+      const patch = {
+        stock_available: count,
+        _partId: partId,
+        chassis_no: '',
+        engine_no: '',
+      };
+      setFormData((prev) => ({
+        ...prev,
+        vehicle_details: {
+          ...prev['vehicle_details'],
+          ...patch,
+        },
+      }));
+
+      if (options?.toastOnResult !== false) {
+        if (count > 0) {
+          toast({
+            title: `${count} frame(s) in stock`,
+            description: 'Select chassis and engine from the dropdown below.',
+          });
+        } else {
+          toast({
+            title: 'No frames available',
+            description: 'No chassis numbers found for this variant.',
+            variant: 'destructive',
+          });
+        }
       }
+      return patch;
     } catch (err: any) {
-      console.error('Failed to load chassis frames:', err);
-      toast({ title: 'Chassis load failed', description: err.response?.data?.error || 'Could not fetch chassis numbers.', variant: 'destructive' });
+      console.error('Failed to load vehicle frames:', err);
+      setChassisOptions([]);
+      const patch = { stock_available: 0, chassis_no: '', engine_no: '' };
+      setFormData((prev) => ({
+        ...prev,
+        vehicle_details: {
+          ...prev['vehicle_details'],
+          ...patch,
+        },
+      }));
+      if (options?.toastOnResult !== false) {
+        toast({
+          title: 'Frame load failed',
+          description: err.response?.data?.error || 'Could not fetch chassis numbers.',
+          variant: 'destructive',
+        });
+      }
+      return patch;
     } finally {
       setChassisLoading(false);
     }
   };
 
-  // Perform vehicle allotment using selected chassis frame data
+  const handleFetchChassis = async () => {
+    const vehicleData = formData['vehicle_details'] || {};
+    const partId = vehicleData._variantPartId || vehicleData._partId;
+    await loadFramesForPart(partId);
+  };
+
+  /* Perform vehicle allotment (LEGACY — API path, detached from button)
   const handlePerformAllotment = async () => {
     const vehicleData = formData['vehicle_details'] || {};
     const selectedChassis = vehicleData.chassis_no;
@@ -809,6 +1562,7 @@ export function FormFill() {
       setAllotmentLoading(false);
     }
   };
+  */
 
   /* Save booking after allotment — hidden for now, kept for future use
   const handleSaveBookingAfterAllotment = async () => {
@@ -851,7 +1605,6 @@ export function FormFill() {
       toast({ title: 'No phone number', description: 'Fetch enquiry details on Tab 1 first to get the customer phone number.', variant: 'destructive' });
       return;
     }
-    setSearchBookingLoading(true);
     try {
       const resp = await externalApi.searchBooking({
         contactNo: phoneNo,
@@ -886,8 +1639,6 @@ export function FormFill() {
     } catch (err: any) {
       console.error('SearchBooking error:', err);
       toast({ title: 'Fetch failed', description: err.response?.data?.error || 'Could not search bookings.', variant: 'destructive' });
-    } finally {
-      setSearchBookingLoading(false);
     }
   };
 
@@ -957,11 +1708,21 @@ export function FormFill() {
       'registration_number': vehicleData.registration_type || '',
       
       // Invoice - Amount details
-      'base_amount': amountsData.base_amount || '',
+      'base_amount': amountsData.base_amount || getExShowroomInclGstFromVehicle(vehicleData) || '',
       'other_charges': amountsData.other_amount || '',
       'discount_amount': amountsData.discount || '',
-      'tax_amount': amountsData.life_tax_amount || '',
-      'total_amount': amountsData.total_amount || '',
+      'tax_amount': amountsData.life_tax_amount || vehicleData.life_time_tax || '',
+      'total_amount':
+        amountsData.total_amount ||
+        calcAmountsScreenTotal(
+          {
+            ...amountsData,
+            base_amount: amountsData.base_amount || getExShowroomInclGstFromVehicle(vehicleData),
+            life_tax_amount: amountsData.life_tax_amount || vehicleData.life_time_tax,
+          },
+          parseFloat(String(vehicleData.life_time_tax)) || 0
+        ) ||
+        '',
       'payment_mode': amountsData.payment_mode || '',
       
       // Invoice - Insurance details
@@ -1050,15 +1811,102 @@ export function FormFill() {
       }
     }
     
+    if (currentScreenCode === 'amounts_tax') {
+      const vd = formData['vehicle_details'] || {};
+      const at = formData['amounts_tax'] || {};
+      if (fieldName === 'base_amount') {
+        return getExShowroomInclGstFromVehicle(vd);
+      }
+      if (fieldName === 'life_tax_amount') {
+        return vd.life_time_tax ?? at.life_tax_amount ?? '';
+      }
+      if (fieldName === 'total_amount') {
+        return calcAmountsScreenTotal(
+          {
+            ...at,
+            base_amount: getExShowroomInclGstFromVehicle(vd),
+            life_tax_amount: vd.life_time_tax ?? at.life_tax_amount,
+          },
+          parseFloat(String(vd.life_time_tax)) || 0
+        );
+      }
+      if (fieldName === 'accessories_amount') {
+        return at.accessories_amount ?? at.ew_discount ?? '';
+      }
+    }
+    
     return formData[currentScreenCode]?.[fieldName] ?? '';
   };
 
   const setFieldValue = (fieldName: string, value: any) => {
+    // Auto-calculate Vehicle Price when ex-showroom / CGST / SGST changes on Screen 3
+    if (
+      currentScreenCode === 'vehicle_details' &&
+      (fieldName === 'ex_showroom_price' || fieldName === 'cgst_amount' || fieldName === 'sgst_amount')
+    ) {
+      setFormData((prev) => {
+        const vd = { ...prev['vehicle_details'], [fieldName]: value };
+        vd.vehicle_total_price = calcVehicleTotalFromParts(vd);
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
+      });
+      if (errors[fieldName]) {
+        setErrors((prev) => {
+          const newErrors = { ...prev };
+          delete newErrors[fieldName];
+          return newErrors;
+        });
+      }
+      return;
+    }
+
+    if (currentScreenCode === 'vehicle_details' && fieldName === 'life_time_tax') {
+      setFormData((prev) => {
+        const vd = { ...prev['vehicle_details'], life_time_tax: value };
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
+      });
+      if (errors[fieldName]) {
+        setErrors((prev) => {
+          const newErrors = { ...prev };
+          delete newErrors[fieldName];
+          return newErrors;
+        });
+      }
+      return;
+    }
+
+    if (currentScreenCode === 'vehicle_details' && fieldName === 'vehicle_total_price') {
+      setFormData((prev) => {
+        const vd = { ...prev['vehicle_details'], vehicle_total_price: value };
+        return {
+          ...prev,
+          vehicle_details: vd,
+          amounts_tax: buildSyncedAmountsTax(vd, prev['amounts_tax']),
+        };
+      });
+      if (errors[fieldName]) {
+        setErrors((prev) => {
+          const newErrors = { ...prev };
+          delete newErrors[fieldName];
+          return newErrors;
+        });
+      }
+      return;
+    }
+
     // Handle cascading resets for vehicle fields
     if (currentScreenCode === 'vehicle_details' && CASCADING_VEHICLE_FIELDS.includes(fieldName)) {
       const dependentFields: Record<string, string[]> = {
-        brand: ['model', 'variant'],
-        model: ['variant'],
+        brand: ['model', 'submodel', 'variant'],
+        model: ['submodel', 'variant'],
+        submodel: ['variant'],
         variant: [],
       };
       
@@ -1078,21 +1926,81 @@ export function FormFill() {
       
       // Reset dependent options
       if (fieldName === 'brand') {
-        setVehicleCatalogOptions(prev => ({ ...prev, models: [], variants: [] }));
+        setVehicleCatalogOptions(prev => ({ ...prev, models: [], submodels: [], variants: [] }));
+        setChassisOptions([]);
         setFormData(prev => ({
           ...prev,
-          vehicle_details: { ...prev['vehicle_details'], _variantPartId: '', _variantModelId: '', _variantName: '' },
+          vehicle_details: {
+            ...prev['vehicle_details'],
+            _tvsCatalogLoaded: false,
+            _variantPartId: '',
+            _variantModelId: '',
+            _variantName: '',
+            _submodelLabel: '',
+          },
         }));
-        if (value) loadCascadingOptions('model', { brand: value });
+        if (value && value !== 'TVS') loadCascadingOptions('model', { brand: value });
       } else if (fieldName === 'model') {
-        setVehicleCatalogOptions(prev => ({ ...prev, variants: [] }));
+        setVehicleCatalogOptions(prev => ({ ...prev, submodels: [], variants: [] }));
+        setChassisOptions([]);
         setFormData(prev => ({
           ...prev,
-          vehicle_details: { ...prev['vehicle_details'], _variantPartId: '', _variantModelId: '', _variantName: '' },
+          vehicle_details: {
+            ...prev['vehicle_details'],
+            _variantPartId: '',
+            _variantModelId: '',
+            _variantName: '',
+            _submodelLabel: '',
+          },
         }));
         const vehicleData = formData['vehicle_details'] || {};
-        if (value) loadCascadingOptions('variant', { ...vehicleData, model: value });
+        if (value) {
+          if (vehicleData._tvsCatalogLoaded && vehicleData.brand === 'TVS') {
+            loadCascadingOptions('submodel', { ...vehicleData, model: value });
+          } else {
+            loadCascadingOptions('variant', { ...vehicleData, model: value });
+          }
+        }
+      } else if (fieldName === 'submodel') {
+        setVehicleCatalogOptions(prev => ({ ...prev, variants: [] }));
+        setChassisOptions([]);
+        const selectedSub = vehicleCatalogOptions.submodels.find((s) => s.value === value);
+        setFormData(prev => ({
+          ...prev,
+          vehicle_details: {
+            ...prev['vehicle_details'],
+            _submodelLabel: selectedSub?.label || value,
+            model_id: value || '',
+            _variantPartId: '',
+            _variantModelId: '',
+            _variantName: '',
+          },
+        }));
+        const vehicleData = formData['vehicle_details'] || {};
+        if (value) {
+          if (vehicleData._tvsCatalogLoaded && vehicleData.brand === 'TVS') {
+            loadCascadingOptions('variant', {
+              ...vehicleData,
+              submodel: value,
+              model_id: value,
+            });
+          } else {
+            loadCascadingOptions('variant', { ...vehicleData, submodel: value });
+          }
+        }
       }
+    } else if (
+      currentScreenCode === 'amounts_tax' &&
+      AMOUNTS_TOTAL_INPUT_FIELDS.includes(fieldName)
+    ) {
+      setFormData((prev) => {
+        const vd = prev['vehicle_details'] || {};
+        const at = { ...prev['amounts_tax'], [fieldName]: value };
+        return {
+          ...prev,
+          amounts_tax: buildSyncedAmountsTax(vd, at),
+        };
+      });
     } else {
       setFormData((prev) => ({
         ...prev,
@@ -1350,6 +2258,7 @@ export function FormFill() {
   };
 
   const isFieldEditable = (field: ScreenField) => {
+    if (field.isReadOnly) return false;
     if (!canEdit) return false;
     const role = user?.role;
     if (role === 'MANAGER') return field.editableByManager;
@@ -1362,8 +2271,116 @@ export function FormFill() {
     return false;
   };
 
+  const renderVehiclePricingPanel = () => {
+    const vd = formData['vehicle_details'] || {};
+    const editable = canEdit;
+    const exShowroom = vd.ex_showroom_price ?? '';
+    const cgstAmount = vd.cgst_amount ?? '';
+    const sgstAmount = vd.sgst_amount ?? '';
+    const vehicleTotal = vd.vehicle_total_price ?? calcVehicleTotalFromParts(vd);
+    const cgstPerc = vd._cgstPerc ?? cgstMeta?.perc;
+    const sgstPerc = vd._sgstPerc ?? sgstMeta?.perc;
+    const cgstLabel = cgstPerc != null && cgstPerc !== '' ? `CGST (${cgstPerc}%)` : 'CGST';
+    const sgstLabel = sgstPerc != null && sgstPerc !== '' ? `SGST (${sgstPerc}%)` : 'SGST';
+
+    const computedTotal = calcVehicleTotalFromParts(vd);
+    const displayTotal = vehicleTotal !== '' && vehicleTotal != null ? vehicleTotal : computedTotal;
+
+    return (
+      <div
+        key="vehicle-pricing-panel"
+        className="col-span-full rounded-lg border border-slate-200 bg-slate-50/80 p-4 space-y-4"
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label className="text-sm font-medium">Stock Available</Label>
+            <Input
+              type="number"
+              step="1"
+              min="0"
+              placeholder="From pre-booking"
+              value={vd.stock_available ?? ''}
+              onChange={(e) => setFieldValue('stock_available', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-sm font-medium">Life Time Tax</Label>
+            <Input
+              type="number"
+              step="0.01"
+              placeholder="Enter life time tax"
+              value={vd.life_time_tax ?? ''}
+              onChange={(e) => setFieldValue('life_time_tax', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="space-y-1.5 min-w-[140px] flex-1">
+            <Label className="text-sm font-medium">Vehicle Price</Label>
+            <Input
+              type="number"
+              step="0.01"
+              placeholder="Before GST"
+              value={exShowroom}
+              onChange={(e) => setFieldValue('ex_showroom_price', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+          <span className="pb-2.5 text-lg font-medium text-muted-foreground shrink-0">+</span>
+          <div className="space-y-1.5 min-w-[120px] flex-1">
+            <Label className="text-sm font-medium">{cgstLabel}</Label>
+            <Input
+              type="number"
+              step="0.01"
+              placeholder="CGST"
+              value={cgstAmount}
+              onChange={(e) => setFieldValue('cgst_amount', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+          <span className="pb-2.5 text-lg font-medium text-muted-foreground shrink-0">+</span>
+          <div className="space-y-1.5 min-w-[120px] flex-1">
+            <Label className="text-sm font-medium">{sgstLabel}</Label>
+            <Input
+              type="number"
+              step="0.01"
+              placeholder="SGST"
+              value={sgstAmount}
+              onChange={(e) => setFieldValue('sgst_amount', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+          <span className="pb-2.5 text-lg font-medium text-muted-foreground shrink-0">=</span>
+          <div className="space-y-1.5 min-w-[140px] flex-1">
+            <Label className="text-sm font-semibold">Ex-Showroom Price</Label>
+            <Input
+              type="number"
+              step="0.01"
+              className="font-semibold"
+              placeholder="Including GST"
+              value={displayTotal}
+              onChange={(e) => setFieldValue('vehicle_total_price', e.target.value)}
+              disabled={!editable}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderField = (field: ScreenField) => {
     if (!isFieldVisible(field)) return null;
+    // Legacy field removed from seed — hide if still present in cached screen config
+    if (field.name === 'comments' && currentScreenCode === 'vehicle_details') return null;
+    if (
+      currentScreenCode === 'vehicle_details' &&
+      VEHICLE_PRICING_PANEL_FIELDS.includes(field.name)
+    ) {
+      return null;
+    }
 
     // Custom: model_id — hidden by default, revealed via eye icon
     if (field.name === 'model_id' && currentScreenCode === 'vehicle_details') {
@@ -1387,6 +2404,11 @@ export function FormFill() {
           </div>
         </div>
       );
+    }
+
+    // Legacy field removed from Screen 4 config
+    if (field.name === 'ew_discount' && currentScreenCode === 'amounts_tax') {
+      return null;
     }
 
     // Custom: CGST/SGST line — formatted display with cross-check validation
@@ -1471,9 +2493,9 @@ export function FormFill() {
           >
             <SelectTrigger className={cn(error && 'border-destructive', chassisLoading && 'pr-10')}>
               <SelectValue placeholder={
-                chassisLoading ? 'Loading chassis numbers...' :
-                chassisOptions.length === 0 ? 'Complete booking to load chassis' :
-                'Select chassis number'
+                chassisLoading ? 'Loading frames...' :
+                chassisOptions.length === 0 ? 'Select a variant to load frames' :
+                'Select chassis / engine'
               } />
             </SelectTrigger>
             <SelectContent>
@@ -1535,12 +2557,19 @@ export function FormFill() {
               break;
             case 'model':
               cascadingStringOptions = vehicleCatalogOptions.models;
-              isLoading = catalogLoading['model'] || false;
-              isDisabled = isDisabled || !vehicleData.brand;
+              isLoading = catalogLoading['model'] || catalogLoading['tvs'] || false;
+              isDisabled = isDisabled || !vehicleData.brand ||
+                (vehicleData.brand === 'TVS' && !vehicleData._tvsCatalogLoaded);
+              break;
+            case 'submodel':
+              isLoading = catalogLoading['submodel'] || false;
+              isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model ||
+                (vehicleData.brand === 'TVS' && !vehicleData._tvsCatalogLoaded);
               break;
             case 'variant':
               isLoading = catalogLoading['variant'] || false;
-              isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model;
+              isDisabled = isDisabled || !vehicleData.brand || !vehicleData.model ||
+                (vehicleData.brand === 'TVS' && vehicleData._tvsCatalogLoaded && !vehicleData.submodel);
               break;
           }
           
@@ -1570,6 +2599,7 @@ export function FormFill() {
                     onValueChange={(v) => {
                       const chosen = variantOpts.find(opt => opt.value === v);
                       const partIds = chosen?.partIds || [];
+                      const partId = partIds.length === 1 ? partIds[0] : '';
                       setFormData(prev => ({
                         ...prev,
                         vehicle_details: {
@@ -1577,9 +2607,16 @@ export function FormFill() {
                           variant: chosen?.label || v,
                           _variantModelId: chosen?.modelId || '',
                           _variantName: chosen?.originalVariant || '',
-                          _variantPartId: partIds.length === 1 ? partIds[0] : '',
+                          _variantPartId: partId,
+                          chassis_no: '',
+                          engine_no: '',
                         },
                       }));
+                      if (partId) {
+                        loadFramesForPart(partId);
+                      } else {
+                        setChassisOptions([]);
+                      }
                     }}
                     disabled={isDisabled || isLoading}
                   >
@@ -1632,8 +2669,11 @@ export function FormFill() {
                                   vehicle_details: {
                                     ...prev['vehicle_details'],
                                     _variantPartId: pid,
+                                    chassis_no: '',
+                                    engine_no: '',
                                   },
                                 }));
+                                loadFramesForPart(pid);
                               }}
                               className={cn(
                                 'text-xs font-mono px-2 py-0.5 rounded border transition-colors',
@@ -1649,6 +2689,50 @@ export function FormFill() {
                       )
                     )}
                   </div>
+                )}
+              </div>
+            );
+          } else if (field.name === 'submodel') {
+            const submodelOpts = vehicleCatalogOptions.submodels;
+            const submodelDisplay =
+              submodelOpts.find((s) => s.value === value)?.label ||
+              vehicleData._submodelLabel ||
+              value ||
+              '';
+            input = (
+              <div className="relative">
+                <Select
+                  value={value}
+                  onValueChange={(v) => setFieldValue(field.name, v)}
+                  disabled={isDisabled || isLoading}
+                >
+                  <SelectTrigger className={cn(error && 'border-destructive', isLoading && 'pr-10')}>
+                    <SelectValue placeholder={
+                      isLoading ? 'Loading...' :
+                      isDisabled && !editable ? 'Select...' :
+                      isDisabled ? 'Select model first' :
+                      field.placeholder || 'Select sub-model...'
+                    }>
+                      {submodelDisplay}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {submodelOpts.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {isLoading && (
+                  <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+                {!isLoading && submodelOpts.length === 0 && vehicleData.model && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {vehicleData._tvsCatalogLoaded
+                      ? 'No sub-models returned for this model group.'
+                      : 'Click Refresh Model beside Brand to load the TVS catalog first.'}
+                  </p>
                 )}
               </div>
             );
@@ -1807,9 +2891,24 @@ export function FormFill() {
         "space-y-2",
         isBookedStatusField && "rounded-lg border-2 border-red-500 bg-red-50 p-3"
       )}>
-        <Label className={cn("flex items-center gap-1", isBookedStatusField && "text-red-700 font-semibold")}>
+        <Label className={cn("flex items-center gap-1 flex-wrap", isBookedStatusField && "text-red-700 font-semibold")}>
           {field.label}
           {field.isRequired && <span className="text-destructive">*</span>}
+          {currentScreenCode === 'vehicle_details' && field.name === 'brand' && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="ml-1 h-7 px-2 text-xs"
+              onClick={handleSelectTvs}
+              disabled={!editable || !!catalogLoading['tvs']}
+            >
+              {catalogLoading['tvs'] ? (
+                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+              ) : null}
+              Refresh Model
+            </Button>
+          )}
           {isBookedStatusField && <span className="ml-2 text-xs bg-red-600 text-white px-2 py-0.5 rounded-full">BLOCKED</span>}
         </Label>
         {input}
@@ -1830,15 +2929,69 @@ export function FormFill() {
     return <div className="text-center py-12">Flow not found</div>;
   }
 
+  const displayEnquiryId =
+    fetchedEnquiryNo ||
+    formData['customer_enquiry']?.enquiry_no ||
+    submission?.formData?.customer_enquiry?.enquiry_no ||
+    '';
+  const displayPhone =
+    formData['customer_enquiry']?.mobile_no ||
+    submission?.formData?.customer_enquiry?.mobile_no ||
+    '';
+
+  const vehicleDetailsData = formData['vehicle_details'] || {};
+  const stockAvailableCount = parseInt(String(vehicleDetailsData.stock_available ?? ''), 10);
+  const hasStockForBooking = Number.isFinite(stockAvailableCount) && stockAvailableCount >= 1;
+
   return (
-    <div className="page-enter space-y-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{flow.name}</h1>
-          <p className="text-muted-foreground">{flow.description}</p>
+    <div className="page-enter space-y-6 max-w-5xl mx-auto">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 print:hidden">
+        <div className="shrink-0 min-w-[10rem]">
+          <h1 className="text-2xl font-bold leading-tight">{flow.name}</h1>
+          <p className="text-sm text-muted-foreground">{flow.description}</p>
         </div>
+
+        <div className="flex flex-1 flex-wrap items-center justify-center gap-x-4 gap-y-2 min-w-[12rem] px-1">
+          <div className="flex items-center gap-1.5 text-sm whitespace-nowrap">
+            <span className="text-muted-foreground">Enquiry ID</span>
+            <span className="font-mono font-semibold">{displayEnquiryId || '—'}</span>
+          </div>
+          <span className="hidden sm:inline text-muted-foreground/40">|</span>
+          <div className="flex items-center gap-1.5 text-sm whitespace-nowrap">
+            <span className="text-muted-foreground">Phone</span>
+            <span className="font-mono font-medium">{displayPhone || '—'}</span>
+          </div>
+          <span className="hidden sm:inline text-muted-foreground/40">|</span>
+          <div className="flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1">
+            <Key className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+            <span className="text-xs font-medium text-amber-800">OTP</span>
+            <Input
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              placeholder="0000"
+              value={otpValue}
+              onChange={(e) => {
+                const value = e.target.value.replace(/\D/g, '').slice(0, 4);
+                setOtpValue(value);
+              }}
+              className="w-14 h-7 text-center font-mono text-xs px-1 bg-white"
+            />
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 px-2 text-xs bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={handleOtpUpdate}
+              disabled={isUpdatingOtp || !otpValue || otpValue.length !== 4}
+            >
+              {isUpdatingOtp ? '...' : 'Save'}
+            </Button>
+          </div>
+        </div>
+
         {submission && (
           <Badge className={cn(
+            'shrink-0 ml-auto',
             submission.status === 'DRAFT' && 'bg-gray-100 text-gray-800',
             submission.status === 'PENDING_APPROVAL' && 'bg-yellow-100 text-yellow-800',
             submission.status === 'APPROVED' && 'bg-green-100 text-green-800',
@@ -2013,12 +3166,20 @@ export function FormFill() {
               <Button
                 variant="outline"
                 className="gap-2 border-orange-400 text-orange-700 hover:bg-orange-50"
-                onClick={() => {
-                  toast({ title: 'Invoice not generated', description: 'Invoice generation API is not linked yet.', variant: 'destructive' });
-                }}
+                disabled={generateInvoiceLoading}
+                onClick={handleGenerateInvoiceViaAutomation}
               >
-                <Play className="h-4 w-4" />
-                Generate Invoice
+                {generateInvoiceLoading ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    Generating Invoice...
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4" />
+                    Generate Invoice
+                  </>
+                )}
               </Button>
             )}
             {/* Fetch Pre Booking, Pre Fetch & Perform Booking - on vehicle_details screen */}
@@ -2027,7 +3188,7 @@ export function FormFill() {
                 <Button
                   variant="outline"
                   onClick={handleFetchPreBooking}
-                  disabled={preBookingLoading || modelPartsLoading}
+                  disabled={preBookingLoading}
                   className={cn(
                     "gap-2",
                     preBookingDone
@@ -2035,10 +3196,10 @@ export function FormFill() {
                       : "border-purple-300 text-purple-700 hover:bg-purple-50"
                   )}
                 >
-                  {preBookingLoading || modelPartsLoading ? (
+                  {preBookingLoading ? (
                     <>
                       <RefreshCw className="h-4 w-4 animate-spin" />
-                      {modelPartsLoading ? 'Loading Model Parts...' : 'Fetching Pre-Booking...'}
+                      Fetching Pre-Booking...
                     </>
                   ) : preBookingDone ? (
                     <>
@@ -2093,7 +3254,19 @@ export function FormFill() {
               {currentFields
                 .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
                 .filter((field: ScreenField) => !POST_BOOKING_FIELDS.includes(field.name))
+                .filter((field: ScreenField) => !VEHICLE_PRICING_PANEL_FIELDS.includes(field.name))
+                .filter((field: ScreenField) => !FRAME_SELECTION_FIELDS.includes(field.name))
+                .filter((field: ScreenField) => field.name !== 'comments')
                 .map((field: ScreenField) => renderField(field))}
+
+              {renderVehiclePricingPanel()}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 col-span-full">
+                {currentFields
+                  .filter((field: ScreenField) => FRAME_SELECTION_FIELDS.includes(field.name))
+                  .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+                  .map((field: ScreenField) => renderField(field))}
+              </div>
 
               {/* Booking divider with Perform Booking button */}
               <div className="relative my-6">
@@ -2107,7 +3280,7 @@ export function FormFill() {
                 </div>
               </div>
 
-              <div className="flex items-end gap-3 p-4 rounded-lg border border-blue-200 bg-blue-50/50">
+              <div className="flex flex-col sm:flex-row sm:items-end gap-3 p-4 rounded-lg border border-blue-200 bg-blue-50/50">
                 <div className="flex-1 max-w-xs">
                   <Label className="text-sm font-medium mb-1.5 block">Booking Amount</Label>
                   <Input
@@ -2118,92 +3291,69 @@ export function FormFill() {
                     disabled={bookingSectionUnlocked || performBookingLoading}
                   />
                 </div>
-                <Button
-                  onClick={async () => {
-                    if (!bookingAmount) {
-                      toast({ title: 'Booking amount required', description: 'Please enter the booking amount to proceed.', variant: 'destructive' });
-                      return;
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => handlePerformBookingViaAutomation()}
+                    disabled={bookingSectionUnlocked || performBookingLoading}
+                    className={cn(
+                      'gap-2',
+                      bookingSectionUnlocked
+                        ? 'bg-green-600 hover:bg-green-600 cursor-default'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    )}
+                  >
+                    {performBookingLoading ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        Running...
+                      </>
+                    ) : bookingSectionUnlocked ? (
+                      <>
+                        <Unlock className="h-4 w-4" />
+                        Booking Done
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-4 w-4" />
+                        Perform Booking without Stock
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    onClick={() => handlePerformBookingViaAutomation({ requireStock: true })}
+                    disabled={bookingSectionUnlocked || performBookingLoading || !hasStockForBooking}
+                    title={
+                      !hasStockForBooking
+                        ? 'Stock must be 1 or more (load frames after selecting Variant)'
+                        : undefined
                     }
-                    setPerformBookingLoading(true);
-                    try {
-                      const vehicleData = formData['vehicle_details'] || {};
-
-                      // Step 1: SetBookingLineItem — sets model/part on the booking
-                      toast({ title: 'Setting line item...', description: 'Configuring vehicle details on the booking.' });
-                      const lineItemResponse = await externalApi.setBookingLineItem({
-                        enquiryId: fetchedEnquiryNo!,
-                        partId: vehicleData._variantPartId || undefined,
-                        brand: vehicleData.brand,
-                        model: vehicleData.model,
-                        variant: vehicleData.variant,
-                      });
-
-                      if (!lineItemResponse.data.success) {
-                        toast({ title: 'Line item failed', description: lineItemResponse.data.error || 'Failed to set booking line item.', variant: 'destructive' });
-                        setPerformBookingLoading(false);
-                        return;
-                      }
-
-                      const rawData = lineItemResponse.data.data;
-                      const lineItemData = Array.isArray(rawData)
-                        ? rawData[0]
-                        : rawData;
-
-                      // requestPartData has pricing from pre-booking cache (reliable fallback)
-                      const rpd = lineItemResponse.data.requestPartData || {};
-
-                      // Use TVS response fields first, fall back to request part data
-                      const unitPrice = lineItemData?.UNIT_PRICE || rpd.UNIT_PRICE || 0;
-                      const exShrmPrice = lineItemData?.EX_SHRM_PRICE || rpd.EX_SHRM_PRICE || unitPrice;
-
-                      setBookingConfirmData({
-                        lineItemData,
-                        brand: vehicleData.brand || lineItemData?.BRAND_NAME || '',
-                        model: vehicleData.model || lineItemData?.MODEL_NAME || '',
-                        variant: vehicleData.variant || lineItemData?.VARIANT_NAME || '',
-                        quantity: lineItemData?.BOOKED_QTY || rpd.BOOKED_QTY || 1,
-                        unitPrice,
-                        exShowroomPrice: exShrmPrice,
-                        accCharges: lineItemData?.ACC_CHARGES || rpd.ACC_CHARGES || 0,
-                        discount: lineItemData?.DISC_VALUE || rpd.DISC_VALUE || 0,
-                        manualDiscount: lineItemData?.MANUAL_DISC || rpd.MANUAL_DISC || 0,
-                        regCharges: lineItemData?.REG_CHARGES || rpd.REG_CHARGES || 0,
-                        insCharges: lineItemData?.INS_CHARGES || rpd.INS_CHARGES || 0,
-                        bookingAmt: Number(bookingAmount),
-                      });
-                      setShowBookingConfirm(true);
-                    } catch (error: any) {
-                      console.error('SetBookingLineItem error:', error);
-                      toast({ title: 'Line item failed', description: error.response?.data?.error || 'Failed to set booking line item.', variant: 'destructive' });
-                    } finally {
-                      setPerformBookingLoading(false);
-                    }
-                  }}
-                  disabled={bookingSectionUnlocked || performBookingLoading}
-                  className={cn(
-                    "gap-2",
-                    bookingSectionUnlocked
-                      ? "bg-green-600 hover:bg-green-600 cursor-default"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  )}
-                >
-                  {performBookingLoading ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      Processing...
-                    </>
-                  ) : bookingSectionUnlocked ? (
-                    <>
-                      <Unlock className="h-4 w-4" />
-                      Booking Done
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="h-4 w-4" />
-                      Perform Booking
-                    </>
-                  )}
-                </Button>
+                    className={cn(
+                      'gap-2',
+                      bookingSectionUnlocked
+                        ? 'bg-green-600 hover:bg-green-600 cursor-default'
+                        : hasStockForBooking
+                          ? 'bg-indigo-600 hover:bg-indigo-700'
+                          : ''
+                    )}
+                  >
+                    {performBookingLoading ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        Running...
+                      </>
+                    ) : bookingSectionUnlocked ? (
+                      <>
+                        <Unlock className="h-4 w-4" />
+                        Booking Done
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-4 w-4" />
+                        Perform Booking with Chasis
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
 
               {/* Post-booking fields — overlay temporarily disabled for testing */}
@@ -2219,33 +3369,6 @@ export function FormFill() {
                 )}
                 */}
                 <div className={cn("space-y-4")}>
-                  {/* Fetch Booked Details — loads booking info by phone number */}
-                  <div className="flex items-center gap-3 p-3 rounded-lg border bg-amber-50/50">
-                    <Button
-                      onClick={handleSearchBooking}
-                      disabled={searchBookingLoading || !(formData['customer_enquiry']?.mobile_no)}
-                      variant="outline"
-                      className="gap-2 border-amber-500 text-amber-700 hover:bg-amber-50"
-                    >
-                      {searchBookingLoading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Searching...
-                        </>
-                      ) : (
-                        <>
-                          <Search className="h-4 w-4" />
-                          Fetch Booked Details
-                        </>
-                      )}
-                    </Button>
-                    <span className="text-xs text-muted-foreground">
-                      {formData['customer_enquiry']?.mobile_no
-                        ? `Search bookings for ${formData['customer_enquiry'].mobile_no}`
-                        : 'Fetch enquiry details on Tab 1 first'}
-                    </span>
-                  </div>
-
                   {/* Fetch Chassis button — loads FRAME_NO dropdown from TVS */}
                   <div className="flex items-center gap-3 p-3 rounded-lg border bg-blue-50/50">
                     <Button
@@ -2278,8 +3401,8 @@ export function FormFill() {
                     </Button>
                     <span className="text-xs text-muted-foreground">
                       {chassisOptions.length > 0
-                        ? `${chassisOptions.length} chassis number(s) loaded — select from dropdown below`
-                        : 'Click to load available chassis numbers for allotment'}
+                        ? `${chassisOptions.length} frame(s) loaded — refresh or re-select variant to reload`
+                        : 'Refresh frames after variant selection (also loads automatically)'}
                     </span>
                   </div>
 
@@ -2291,7 +3414,7 @@ export function FormFill() {
                   {/* Perform Allotment button — below RTO State */}
                   <div className="flex items-center gap-3 p-3 rounded-lg border bg-purple-50/50 mt-2">
                     <Button
-                      onClick={handlePerformAllotment}
+                      onClick={handlePerformAllotmentViaAutomation}
                       disabled={allotmentLoading || !(formData['vehicle_details']?.chassis_no) || chassisOptions.length === 0}
                       variant="outline"
                       className="gap-2 border-purple-500 text-purple-700 hover:bg-purple-50"
@@ -2346,6 +3469,11 @@ export function FormFill() {
           ) : (
             currentFields
               .sort((a: ScreenField, b: ScreenField) => a.sortOrder - b.sortOrder)
+              .filter(
+                (field: ScreenField) =>
+                  currentScreenCode !== 'amounts_tax' ||
+                  !AMOUNTS_TAX_HIDDEN_FIELDS.includes(field.name)
+              )
               .map((field: ScreenField) => renderField(field))
           )}
         </CardContent>

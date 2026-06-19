@@ -121,6 +121,11 @@ export const branchApi = {
     api.post(`/branches/${id}/fields`, data),
   deleteField: (id: string, fieldId: string) =>
     api.delete(`/branches/${id}/fields/${fieldId}`),
+  getAutomationConfig: (id: string) => api.get(`/branches/${id}/automation-config`),
+  updateAutomationConfig: (
+    id: string,
+    data: { TVS_AUTOMATION_USER_ID?: string; TVS_AUTOMATION_PASSWORD?: string }
+  ) => api.put(`/branches/${id}/automation-config`, data),
 };
 
 // Users
@@ -301,11 +306,41 @@ export const uploadApi = {
   getFileInfo: (filepath: string) => api.get(`/upload/info/${encodeURIComponent(filepath)}`),
 };
 
-// Jobs (Robot Framework Automation)
+// Jobs (Robot Framework / Playwright Automation)
 export const jobApi = {
   runAllEntries: () => api.post('/jobs/run-all'),
   runLastEntry: () => api.post('/jobs/run-last'),
-  runBooking: (enquiryNo: string) => api.post('/jobs/run-booking', { enquiryNo }),
+  runBooking: (data: {
+    enquiryNo: string;
+    bookingAmount?: string | number;
+    otp: string;
+    submodel: string;
+    vehicle: string;
+    headless?: boolean;
+  }) => api.post('/jobs/run-booking', data),
+  runAllotment: (data: {
+    enquiryNo: string;
+    chassisNo?: string;
+    bookingNo?: string;
+    submodel: string;
+    vehicle: string;
+    otp: string;
+    skipVehicleSelect?: boolean;
+    singleFrameStock?: boolean;
+    headless?: boolean;
+  }) => api.post('/jobs/run-allotment', data),
+  runInvoice: (data: {
+    enquiryNo?: string;
+    bookingNo: string;
+    otp: string;
+    userName: string;
+    addressLine1: string;
+    mobile: string;
+    dob?: string;
+    gender?: string;
+    language?: string;
+    headless?: boolean;
+  }) => api.post('/jobs/run-invoice', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),
   runInsurance: (enquiryNo: string, submissionId?: string) => 
     api.post('/jobs/run-insurance', { enquiryNo, submissionId }),
@@ -345,6 +380,9 @@ export const externalApi = {
     api.post('/external/save-booking-after-allotment', data),
   searchBooking: (data: { contactNo: string; enquiryId?: string }) =>
     api.post('/external/search-booking', data),
+  getFormatVehicleTemplateStatus: () => api.get('/external/format-vehicle-template/status'),
+  formatVehicleModel: (data: { action?: 'load'; group?: string; enquiryId?: string }) =>
+    api.post('/external/format-vehicle-model', data),
   getCachedEnquiry: (enquiryId: string) =>
     api.get(`/external/enquiry-cache/${enquiryId}`),
   listCachedEnquiries: () =>

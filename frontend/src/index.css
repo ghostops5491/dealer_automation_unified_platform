@@ -84,6 +84,18 @@
   @apply bg-muted-foreground/30;
 }
 
+/* Hide number input spinners and treat as plain text fields visually */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* Animations */
 .animate-in {
   animation: animate-in 0.2s ease-out;

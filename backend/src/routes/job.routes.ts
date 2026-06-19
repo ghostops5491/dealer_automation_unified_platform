@@ -4,6 +4,8 @@ import {
   runJobForAllEntries,
   runJobForLastEntry,
   runBookingJob,
+  runAllotmentJob,
+  runInvoiceJob,
   runEnquiryJob,
   runInsuranceJob,
   getJobStatus,
@@ -24,6 +26,12 @@ router.post('/run-last', requireSuperAdminOrRole('MANAGER'), runJobForLastEntry)
 
 // Run booking job - available to all authenticated users
 router.post('/run-booking', runBookingJob);
+
+// Run allotment job via Playwright - available to all authenticated users
+router.post('/run-allotment', runAllotmentJob);
+
+// Run invoice job via Playwright - available to all authenticated users
+router.post('/run-invoice', runInvoiceJob);
 
 // Run enquiry search job - available to all authenticated users
 router.post('/run-enquiry', runEnquiryJob);

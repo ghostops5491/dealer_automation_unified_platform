@@ -815,6 +815,341 @@ function ensureEnquiryCacheDir() {
   }
 }
 
+// Automation-captured FormatVehicleModel template (from Playwright booking runs)
+const AUTOMATION_CACHE_DIR = path.join(process.cwd(), 'uploads', 'automation');
+const FORMAT_VEHICLE_TEMPLATE_FILE = 'format-vehicle-model-latest.json';
+const FORMAT_VEHICLE_API_URL =
+  'https://www.advantagetvs.in/OnlineSalesWebAPI/MultiVehicle/FormatVehicleModel';
+
+function ensureAutomationCacheDir() {
+  if (!fs.existsSync(AUTOMATION_CACHE_DIR)) {
+    fs.mkdirSync(AUTOMATION_CACHE_DIR, { recursive: true });
+  }
+}
+
+function getFormatVehicleTemplatePath() {
+  return path.join(AUTOMATION_CACHE_DIR, FORMAT_VEHICLE_TEMPLATE_FILE);
+}
+
+function loadFormatVehicleTemplateRecord(): {
+  capturedAt?: string;
+  enquiryNo?: string;
+  url?: string;
+  payload?: Record<string, unknown>;
+} | null {
+  const filePath = getFormatVehicleTemplatePath();
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return parsed?.payload ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveFormatVehicleTemplateRecord(record: {
+  capturedAt: string;
+  enquiryNo?: string;
+  url?: string;
+  payload: Record<string, unknown>;
+}) {
+  ensureAutomationCacheDir();
+  fs.writeFileSync(getFormatVehicleTemplatePath(), JSON.stringify(record, null, 2), 'utf-8');
+}
+
+function mergeFormatVehiclePayload(
+  template: Record<string, unknown>,
+  overrides: { enquiryId?: string }
+): Record<string, unknown> {
+  const body = JSON.parse(JSON.stringify(template)) as Record<string, unknown>;
+
+  if (overrides.enquiryId) {
+    body.ENQUIRY_ID = overrides.enquiryId;
+    body.ENQUIRY_NO = overrides.enquiryId;
+    body.EnquiryId = overrides.enquiryId;
+    body.enquiryId = overrides.enquiryId;
+  }
+
+  return body;
+}
+
+const FORMAT_VEHICLE_RESPONSE_FILE = 'format-vehicle-model-response-latest.json';
+
+function saveFormatVehicleResponse(response: unknown) {
+  ensureAutomationCacheDir();
+  fs.writeFileSync(
+    path.join(AUTOMATION_CACHE_DIR, FORMAT_VEHICLE_RESPONSE_FILE),
+    JSON.stringify({ fetchedAt: new Date().toISOString(), response }, null, 2),
+    'utf-8'
+  );
+}
+
+function loadFormatVehicleResponse(): unknown | null {
+  const filePath = path.join(AUTOMATION_CACHE_DIR, FORMAT_VEHICLE_RESPONSE_FILE);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return parsed?.response ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** TVS returns data: [{ group, items: [...] }] */
+function getFormatVehicleGroupEntries(tvsResponse: any): Array<{ group: string; items: any[] }> {
+  const data = tvsResponse?.data;
+  if (!Array.isArray(data)) return [];
+  return data.filter((entry) => entry && entry.group != null);
+}
+
+function parseFormatVehicleGroups(tvsResponse: any): Array<{ value: string; label: string }> {
+  return getFormatVehicleGroupEntries(tvsResponse).map((entry) => ({
+    value: String(entry.group),
+    label: String(entry.group),
+  }));
+}
+
+function parseFormatVehicleSubModelsForGroup(
+  tvsResponse: any,
+  group: string
+): Array<{ value: string; label: string; raw: unknown }> {
+  const entry = getFormatVehicleGroupEntries(tvsResponse).find(
+    (g) => String(g.group).toLowerCase() === String(group).toLowerCase()
+  );
+  const items: any[] = entry?.items || [];
+  return items.map((item) => ({
+    value: String(item.MODEL_ID),
+    label: String(item.DESCRIPTION || item.MODEL_ID),
+    raw: item,
+  }));
+}
+
+function findFormatVehicleGroupForModelId(
+  tvsResponse: any,
+  modelId: string
+): { group: string; submodelLabel: string; submodelValue: string } | null {
+  const normalizedId = String(modelId).trim();
+  if (!normalizedId) return null;
+
+  for (const entry of getFormatVehicleGroupEntries(tvsResponse)) {
+    const item = (entry.items || []).find(
+      (i: any) => String(i.MODEL_ID || i.ModelId || '').trim() === normalizedId
+    );
+    if (item) {
+      return {
+        group: String(entry.group),
+        submodelLabel: String(item.DESCRIPTION || item.MODEL_ID || normalizedId),
+        submodelValue: normalizedId,
+      };
+    }
+  }
+  return null;
+}
+
+type TvsVariantOption = {
+  value: string;
+  label: string;
+  modelId: string;
+  partId: string;
+  partIds: string[];
+  originalVariant: string;
+};
+
+function mapModelPartsToVariantOptions(parts: any[], modelId: string): TvsVariantOption[] {
+  return parts
+    .map((part) => {
+      const description = String(part.DESCRIPTION || part.Description || '').trim();
+      const partIdVal = String(part.PART_ID || part.PartId || part.partId || '');
+      const modelIdVal = String(part.MODEL_ID || part.ModelId || modelId);
+      if (!description || !partIdVal) return null;
+      return {
+        value: `${modelIdVal}|||${description}`,
+        label: description,
+        modelId: modelIdVal,
+        partId: partIdVal,
+        partIds: [partIdVal],
+        originalVariant: description,
+      };
+    })
+    .filter((v): v is TvsVariantOption => v !== null);
+}
+
+function resolveVariantByPartId(
+  variants: TvsVariantOption[],
+  partId: string
+): TvsVariantOption | null {
+  const normalizedPartId = String(partId).trim();
+  if (!normalizedPartId) return null;
+  return variants.find((v) => v.partId === normalizedPartId) || null;
+}
+
+async function fetchTvsModelParts(token: string, modelId: string, countryCode = 'IN'): Promise<any[]> {
+  const apiUrl = `https://www.advantagetvs.in/OnlineSalesWebAPI/Sales/GetModelPart?ModelId=${encodeURIComponent(modelId)}&CountryCode=${encodeURIComponent(countryCode)}`;
+  const response = await axios.get(apiUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/plain, */*',
+      Origin: 'https://www.advantagetvs.in',
+      Referer: 'https://www.advantagetvs.in/LiteApp/',
+    },
+    timeout: 30000,
+  });
+  const responseData = response.data;
+  const parts: any[] = responseData?.data || responseData || [];
+  return Array.isArray(parts) ? parts : [];
+}
+
+/** Resolve Model (group) → SubModel → Variant from pre-booking MODEL_ID + PART_ID. */
+async function resolveTvsVehicleCascade(params: {
+  token: string;
+  enquiryId: string;
+  modelId: string;
+  partId?: string;
+}): Promise<{
+  resolved: boolean;
+  warnings: string[];
+  catalogOptions?: {
+    groups: Array<{ value: string; label: string }>;
+    submodels: Array<{ value: string; label: string }>;
+    variants: TvsVariantOption[];
+  };
+  cascade?: {
+    brand: string;
+    model: string;
+    submodel: string;
+    submodelLabel: string;
+    variant: string;
+    variantValue: string;
+    partId: string;
+    modelId: string;
+  };
+}> {
+  const warnings: string[] = [];
+  const normalizedModelId = String(params.modelId || '').trim();
+  if (!normalizedModelId) {
+    return { resolved: false, warnings: ['MODEL_ID is missing from pre-booking data'] };
+  }
+
+  const templateRecord = loadFormatVehicleTemplateRecord();
+  if (!templateRecord?.payload) {
+    return {
+      resolved: false,
+      warnings: ['No FormatVehicleModel template. Run Perform Booking automation once to capture the TVS payload.'],
+    };
+  }
+
+  let tvsResponse = loadFormatVehicleResponse();
+  if (!tvsResponse) {
+    try {
+      const requestBody = mergeFormatVehiclePayload(templateRecord.payload, {
+        enquiryId: params.enquiryId,
+      });
+      tvsResponse = await callFormatVehicleModelApi(params.token, requestBody);
+      saveFormatVehicleResponse(tvsResponse);
+    } catch (err: any) {
+      return {
+        resolved: false,
+        warnings: [`FormatVehicleModel fetch failed: ${err.message || 'Unknown error'}`],
+      };
+    }
+  }
+
+  const groups = parseFormatVehicleGroups(tvsResponse);
+  const groupMatch = findFormatVehicleGroupForModelId(tvsResponse, normalizedModelId);
+  if (!groupMatch) {
+    return {
+      resolved: false,
+      warnings: [`MODEL_ID ${normalizedModelId} not found in FormatVehicleModel catalog`],
+      catalogOptions: { groups, submodels: [], variants: [] },
+    };
+  }
+
+  const submodels = parseFormatVehicleSubModelsForGroup(tvsResponse, groupMatch.group).map((s) => ({
+    value: s.value,
+    label: s.label,
+  }));
+
+  let variants: TvsVariantOption[] = [];
+  try {
+    const parts = await fetchTvsModelParts(params.token, normalizedModelId);
+    variants = mapModelPartsToVariantOptions(parts, normalizedModelId);
+
+    ensureEnquiryCacheDir();
+    const cacheFile = path.join(ENQUIRY_CACHE_DIR, `model-parts-${normalizedModelId}.json`);
+    fs.writeFileSync(
+      cacheFile,
+      JSON.stringify({
+        modelId: normalizedModelId,
+        countryCode: 'IN',
+        fetchedAt: new Date().toISOString(),
+        source: 'resolveTvsVehicleCascade',
+        partsCount: parts.length,
+        response: parts,
+      }, null, 2),
+      'utf-8'
+    );
+  } catch (err: any) {
+    warnings.push(`GetModelPart failed: ${err.message || 'Unknown error'}`);
+  }
+
+  const cascade: {
+    brand: string;
+    model: string;
+    submodel: string;
+    submodelLabel: string;
+    variant: string;
+    variantValue: string;
+    partId: string;
+    modelId: string;
+  } = {
+    brand: 'TVS',
+    model: groupMatch.group,
+    submodel: groupMatch.submodelValue,
+    submodelLabel: groupMatch.submodelLabel,
+    variant: '',
+    variantValue: '',
+    partId: params.partId ? String(params.partId).trim() : '',
+    modelId: normalizedModelId,
+  };
+
+  if (params.partId) {
+    const variantMatch = resolveVariantByPartId(variants, params.partId);
+    if (variantMatch) {
+      cascade.variant = variantMatch.label;
+      cascade.variantValue = variantMatch.value;
+      cascade.partId = variantMatch.partId;
+    } else {
+      warnings.push(`PART_ID ${params.partId} not found in GetModelPart variants for MODEL_ID ${normalizedModelId}`);
+    }
+  } else {
+    warnings.push('PART_ID missing from pre-booking — Model and SubModel selected; pick Variant manually');
+  }
+
+  return {
+    resolved: true,
+    warnings,
+    catalogOptions: { groups, submodels, variants },
+    cascade,
+  };
+}
+
+async function callFormatVehicleModelApi(
+  token: string,
+  requestBody: Record<string, unknown>
+): Promise<any> {
+  const apiResponse = await axios.post(FORMAT_VEHICLE_API_URL, requestBody, {
+    headers: {
+      'Content-Type': 'application/json;charset=UTF-8',
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json, text/plain, */*',
+      Origin: 'https://www.advantagetvs.in',
+      Referer: 'https://www.advantagetvs.in/LiteApp/',
+    },
+    timeout: 30000,
+  });
+  return apiResponse.data;
+}
+
 // Populate enquiry details by ID via TVS API and cache the response as a JSON file
 export const populateEnquiryById = async (req: AuthRequest, res: Response) => {
   try {
@@ -1135,25 +1470,21 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
     // Vehicle Details fields
     const customerId = findField('CUSTOMER_ID');
     const modelId = findField('MODEL_ID');
+    const partId = findField('PART_ID');
     const comStateId = findField('COM_STATE_ID');
     if (customerId !== undefined) mappedFields['vehicle_details.customer_id'] = String(customerId);
     if (modelId !== undefined) mappedFields['vehicle_details.model_id'] = String(modelId);
     if (comStateId !== undefined) mappedFields['vehicle_details.rto_state'] = String(comStateId);
+    // stock_available is set from LoadVehicleFrameforAllotment frame count when Variant is selected
 
     // Amounts & Tax fields
     const unitPrice = findField('UNIT_PRICE');
     const exShrmPrice = findField('EX_SHRM_PRICE');
     const taxAmount = findField('TAX_AMOUNT');
-    const totalAmount = findField('TOTAL_AMOUNT');
-    const bookedQty = findField('BOOKED_QTY');
-    const pendingQty = findField('PENDING_QTY');
 
-    if (unitPrice !== undefined) mappedFields['amounts_tax.base_amount'] = unitPrice;
-    if (exShrmPrice !== undefined) mappedFields['amounts_tax.ex_showroom_price'] = exShrmPrice;
-    if (taxAmount !== undefined) mappedFields['amounts_tax.tax_amount'] = taxAmount;
-    if (totalAmount !== undefined) mappedFields['amounts_tax.total_amount'] = totalAmount;
-    if (bookedQty !== undefined) mappedFields['amounts_tax.booked_qty'] = bookedQty;
-    if (pendingQty !== undefined) mappedFields['amounts_tax.pending_qty'] = pendingQty;
+    if (exShrmPrice !== undefined) {
+      mappedFields['vehicle_details.ex_showroom_price'] = exShrmPrice;
+    }
 
     // Extract CGST and SGST from tax details array
     const cgst = taxDetails.find((t: any) =>
@@ -1163,10 +1494,14 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
       t.DESCRIPTION === 'SGST' || t.TAX_TYPE === 'SGST' || t.TAX_NAME?.includes('SGST') || t.TaxType === 'SGST' || t.TaxName?.includes('SGST')
     );
 
+    let cgstValue = 0;
+    let sgstValue = 0;
+
     if (cgst) {
       const perc = cgst.TAX_PERC ?? cgst.TAX_PERCENTAGE ?? cgst.TaxPerc ?? cgst.TaxPercentage ?? 0;
       const applied = cgst.APPLIED_AMT ?? cgst.APPLIED_AMOUNT ?? cgst.AppliedAmt ?? cgst.AppliedAmount ?? 0;
       const taxVal = cgst.TaxValue ?? cgst.TAX_VALUE ?? cgst.TAX_AMOUNT ?? cgst.TaxAmount ?? 0;
+      cgstValue = Number(taxVal) || 0;
       mappedFields['amounts_tax.cgst_line'] = `CGST = ${perc}% on ${applied} = ${taxVal}`;
       mappedFields['_cgst_perc'] = perc;
       mappedFields['_cgst_applied'] = applied;
@@ -1177,18 +1512,65 @@ export const fetchPreBooking = async (req: AuthRequest, res: Response) => {
       const perc = sgst.TAX_PERC ?? sgst.TAX_PERCENTAGE ?? sgst.TaxPerc ?? sgst.TaxPercentage ?? 0;
       const applied = sgst.APPLIED_AMT ?? sgst.APPLIED_AMOUNT ?? sgst.AppliedAmt ?? sgst.AppliedAmount ?? 0;
       const taxVal = sgst.TaxValue ?? sgst.TAX_VALUE ?? sgst.TAX_AMOUNT ?? sgst.TaxAmount ?? 0;
+      sgstValue = Number(taxVal) || 0;
       mappedFields['amounts_tax.sgst_line'] = `SGST = ${perc}% on ${applied} = ${taxVal}`;
       mappedFields['_sgst_perc'] = perc;
       mappedFields['_sgst_applied'] = applied;
       mappedFields['_sgst_value'] = taxVal;
     }
 
+    if (cgstValue > 0) {
+      mappedFields['vehicle_details.cgst_amount'] = parseFloat(cgstValue.toFixed(2));
+    }
+    if (sgstValue > 0) {
+      mappedFields['vehicle_details.sgst_amount'] = parseFloat(sgstValue.toFixed(2));
+    }
+
+    if (mappedFields['vehicle_details.vehicle_total_price'] === undefined && exShrmPrice !== undefined) {
+      mappedFields['vehicle_details.vehicle_total_price'] = parseFloat(
+        (Number(exShrmPrice) + cgstValue + sgstValue).toFixed(2)
+      );
+    } else if (
+      mappedFields['vehicle_details.vehicle_total_price'] === undefined &&
+      taxAmount !== undefined &&
+      exShrmPrice !== undefined
+    ) {
+      mappedFields['vehicle_details.vehicle_total_price'] = parseFloat(
+        (Number(exShrmPrice) + Number(taxAmount)).toFixed(2)
+      );
+    }
+
+    const exShowroomInclGst = mappedFields['vehicle_details.vehicle_total_price'];
+    if (exShowroomInclGst !== undefined) {
+      mappedFields['amounts_tax.base_amount'] = exShowroomInclGst;
+    } else if (unitPrice !== undefined) {
+      mappedFields['amounts_tax.base_amount'] = unitPrice;
+    }
+
     console.log('Pre-booking mappedFields:', JSON.stringify(mappedFields, null, 2));
+
+    // Resolve TVS Model → SubModel → Variant cascade from pre-booking IDs
+    let tvsCascade: Awaited<ReturnType<typeof resolveTvsVehicleCascade>> | null = null;
+    if (modelId && token) {
+      try {
+        tvsCascade = await resolveTvsVehicleCascade({
+          token,
+          enquiryId: String(enquiryId),
+          modelId: String(modelId),
+          partId: partId !== undefined ? String(partId) : undefined,
+        });
+        console.log('Pre-booking tvsCascade:', JSON.stringify(tvsCascade, null, 2));
+      } catch (cascadeErr: any) {
+        console.warn('Pre-booking TVS cascade resolve failed:', cascadeErr.message);
+        tvsCascade = { resolved: false, warnings: [cascadeErr.message || 'Cascade resolve failed'] };
+      }
+    }
 
     res.json({
       success: true,
       data: rawData,
       mappedFields,
+      tvsCascade,
       cachedAs: `pre-booking-${enquiryId}.json`,
     });
 
@@ -1375,6 +1757,23 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
 
     console.log(`VehicleCatalog: inserted ${inserted}, updated ${updated} (with new fields)`);
 
+    const variants = parts
+      .map((part) => {
+        const description = String(part.DESCRIPTION || part.Description || '').trim();
+        const partIdVal = String(part.PART_ID || part.PartId || part.partId || '');
+        const modelIdVal = String(part.MODEL_ID || part.ModelId || modelId);
+        if (!description || !partIdVal) return null;
+        return {
+          value: `${modelIdVal}|||${description}`,
+          label: description,
+          modelId: modelIdVal,
+          partId: partIdVal,
+          partIds: [partIdVal],
+          originalVariant: description,
+        };
+      })
+      .filter((v): v is NonNullable<typeof v> => v !== null);
+
     // Cache the raw response
     ensureEnquiryCacheDir();
     const cacheFile = path.join(ENQUIRY_CACHE_DIR, `model-parts-${modelId}.json`);
@@ -1395,6 +1794,7 @@ export const fetchModelParts = async (req: AuthRequest, res: Response) => {
         updated,
         brands: [...new Set(catalogEntries.map(e => e.brand))],
         models: [...new Set(catalogEntries.map(e => e.model))],
+        variants,
       },
       cachedAs: `model-parts-${modelId}.json`,
     });
@@ -3447,5 +3847,148 @@ export const searchBooking = async (req: AuthRequest, res: Response) => {
       });
     }
     res.status(500).json({ success: false, error: error.message || 'Failed to search bookings' });
+  }
+};
+
+// ── FormatVehicleModel template (captured by Playwright) ──
+
+/** Called by perform-booking.mjs after intercepting TVS FormatVehicleModel POST. No JWT — uses sync key. */
+export const syncFormatVehicleTemplate = async (req: AuthRequest, res: Response) => {
+  try {
+    const syncKey = req.headers['x-automation-sync-key'];
+    const expected = process.env.AUTOMATION_SYNC_KEY || 'crm-automation-sync';
+    if (syncKey !== expected) {
+      return res.status(403).json({ success: false, error: 'Invalid automation sync key' });
+    }
+
+    const { payload, enquiryNo, url, capturedAt } = req.body;
+    if (!payload || typeof payload !== 'object') {
+      return res.status(400).json({ success: false, error: 'payload object is required' });
+    }
+
+    const record = {
+      capturedAt: capturedAt || new Date().toISOString(),
+      enquiryNo: enquiryNo ? String(enquiryNo) : undefined,
+      url: url ? String(url) : FORMAT_VEHICLE_API_URL,
+      payload: payload as Record<string, unknown>,
+    };
+    saveFormatVehicleTemplateRecord(record);
+
+    console.log('FormatVehicleModel template synced from automation', {
+      enquiryNo: record.enquiryNo,
+      capturedAt: record.capturedAt,
+    });
+
+    res.json({ success: true, message: 'FormatVehicleModel template saved', capturedAt: record.capturedAt });
+  } catch (error: any) {
+    console.error('syncFormatVehicleTemplate error:', error.message);
+    res.status(500).json({ success: false, error: error.message || 'Failed to save template' });
+  }
+};
+
+export const getFormatVehicleTemplateStatus = async (_req: AuthRequest, res: Response) => {
+  const record = loadFormatVehicleTemplateRecord();
+  res.json({
+    success: true,
+    hasTemplate: !!record?.payload,
+    capturedAt: record?.capturedAt || null,
+    enquiryNo: record?.enquiryNo || null,
+  });
+};
+
+/** FormatVehicleModel — load TVS catalog (groups → Model) or submodels for a group (→ SubModel). */
+export const formatVehicleModel = async (req: AuthRequest, res: Response) => {
+  try {
+    const { action, group, enquiryId } = req.body;
+    const userId = req.user?.id;
+    const branchId = req.user?.branchId;
+
+    if (!userId || !branchId) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+
+    const templateRecord = loadFormatVehicleTemplateRecord();
+    if (!templateRecord?.payload) {
+      return res.status(404).json({
+        success: false,
+        error: 'No FormatVehicleModel template yet. Run Perform Booking automation once to capture the TVS payload.',
+        hasTemplate: false,
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { branch: true },
+    });
+    if (!user || !user.branch.dealerId || !user.branch.externalBranchId) {
+      return res.status(400).json({ success: false, error: 'Branch API credentials not configured' });
+    }
+
+    let token: string;
+    try {
+      token = await generateTVSToken(
+        user.branch.dealerId!,
+        user.branch.externalBranchId!,
+        user.externalRoleId!,
+        user.externalLoginId!,
+        user.externalUserId || 0
+      );
+    } catch (tokenError: any) {
+      return res.status(502).json({ success: false, error: `TVS token generation failed: ${tokenError.message}` });
+    }
+
+    const requestBody = mergeFormatVehiclePayload(templateRecord.payload, {
+      enquiryId: enquiryId ? String(enquiryId) : undefined,
+    });
+
+    let tvsResponse = loadFormatVehicleResponse();
+
+    if (action === 'load' || !tvsResponse) {
+      console.log('FormatVehicleModel request (load catalog):', JSON.stringify(requestBody));
+      tvsResponse = await callFormatVehicleModelApi(token, requestBody);
+      saveFormatVehicleResponse(tvsResponse);
+    }
+
+    if (action === 'load') {
+      const groups = parseFormatVehicleGroups(tvsResponse);
+      return res.json({
+        success: true,
+        data: { groups },
+        templateCapturedAt: templateRecord.capturedAt,
+        message: groups.length
+          ? `Loaded ${groups.length} TVS model group(s)`
+          : 'TVS returned no model groups',
+      });
+    }
+
+    if (group) {
+      if (!tvsResponse) {
+        tvsResponse = await callFormatVehicleModelApi(token, requestBody);
+        saveFormatVehicleResponse(tvsResponse);
+      }
+      const submodels = parseFormatVehicleSubModelsForGroup(tvsResponse, String(group));
+      return res.json({
+        success: true,
+        data: { submodels },
+        templateCapturedAt: templateRecord.capturedAt,
+        message: submodels.length
+          ? `Found ${submodels.length} sub-model(s) in ${group}`
+          : `No sub-models found for group ${group}`,
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      error: 'Provide action: "load" to fetch groups, or group: "<name>" for submodels',
+    });
+  } catch (error: any) {
+    console.error('formatVehicleModel error:', error?.response?.data || error.message);
+    if (error.response?.status) {
+      return res.status(error.response.status).json({
+        success: false,
+        error: `TVS API error (${error.response.status}): ${JSON.stringify(error.response.data?.message || error.response.data || 'Unknown error')}`,
+      });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to format vehicle model' });
   }
 };

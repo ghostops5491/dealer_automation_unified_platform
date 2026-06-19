@@ -1,0 +1,4 @@
+.env
+otp-by-dealer.json
+node_modules/
+captured/

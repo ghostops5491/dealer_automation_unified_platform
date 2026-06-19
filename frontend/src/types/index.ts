@@ -113,6 +113,7 @@ export interface ScreenField {
   placeholder?: string;
   defaultValue?: string;
   isRequired: boolean;
+  isReadOnly?: boolean;
   validationRegex?: string;
   validationMessage?: string;
   minLength?: number;

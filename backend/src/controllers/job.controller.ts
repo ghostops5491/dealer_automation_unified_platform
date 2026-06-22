@@ -252,9 +252,7 @@ export const runAllotmentJob = async (req: AuthRequest, res: Response) => {
 };
 
 const INVOICE_CONFIG_DEFAULTS: Record<string, string> = {
-  INVOICE_AREA_ID: '3: 1932007',
   INVOICE_RELATIONSHIP: '1: SELF',
-  INVOICE_COMM_LANGUAGE: '3: 3',
   INVOICE_SALE_MODE: '2: 1',
 };
 
@@ -280,7 +278,9 @@ export const runInvoiceJob = async (req: AuthRequest, res: Response) => {
       mobile,
       dob,
       gender,
-      language,
+      languageLabel,
+      maritalStatusLabel,
+      areaLabel,
     } = req.body;
 
     if (!bookingNo && !enquiryNo) {
@@ -297,6 +297,12 @@ export const runInvoiceJob = async (req: AuthRequest, res: Response) => {
     }
     if (!mobile) {
       return res.status(400).json({ success: false, error: 'mobile is required' });
+    }
+    if (!areaLabel || !String(areaLabel).trim()) {
+      return res.status(400).json({ success: false, error: 'areaLabel is required (Mandal from Screen 2)' });
+    }
+    if (!languageLabel || !String(languageLabel).trim()) {
+      return res.status(400).json({ success: false, error: 'languageLabel is required (Language from Screen 1)' });
     }
 
     const branchId = req.user?.branchId;
@@ -342,8 +348,9 @@ export const runInvoiceJob = async (req: AuthRequest, res: Response) => {
       mobile,
       dob: dob || '',
       gender: gender || 'male',
-      language: language || invoiceConfig.INVOICE_COMM_LANGUAGE,
-      areaId: invoiceConfig.INVOICE_AREA_ID,
+      languageLabel: String(languageLabel).trim(),
+      maritalStatusLabel: String(maritalStatusLabel || 'Single').trim(),
+      areaLabel: String(areaLabel).trim(),
       relationship: invoiceConfig.INVOICE_RELATIONSHIP,
       saleMode: invoiceConfig.INVOICE_SALE_MODE,
       dealerCode: String(branch.dealerId),

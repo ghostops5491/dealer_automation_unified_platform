@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Save, Send, Check, Loader2, Printer, Download, Search, ExternalLink, Play, RefreshCw, Eye, EyeOff, Lock, Unlock, AlertCircle, Key } from 'lucide-react';
@@ -36,6 +36,27 @@ const POST_BOOKING_FIELDS = ['registration_type', 'key_no', 'battery_no', 'booki
 
 // Chassis / engine — shown in pre-booking section (after pricing), loaded when Variant is selected
 const FRAME_SELECTION_FIELDS = ['chassis_no', 'engine_no'];
+
+/** Resolve a SELECT field value to its display label for TVS automation (e.g. Mandal → AREA_ID). */
+function resolveFieldOptionLabel(
+  fieldValue: string,
+  screenCode: string,
+  fieldName: string,
+  screens: FlowScreen[]
+): string {
+  const raw = String(fieldValue || '').trim();
+  if (!raw) return '';
+  const screen = screens.find((fs) => fs.screen?.code === screenCode)?.screen;
+  const field = screen?.fields?.find((f) => f.name === fieldName);
+  if (field?.options) {
+    const opts = parseOptions(field.options);
+    const match = opts.find(
+      (o) => o.value === raw || o.label.trim().toLowerCase() === raw.toLowerCase()
+    );
+    if (match) return match.label.trim();
+  }
+  return raw;
+}
 
 // Rendered together in the vehicle pricing panel on Screen 3 (not as separate dynamic fields)
 const VEHICLE_PRICING_PANEL_FIELDS = [
@@ -118,6 +139,33 @@ const VEHICLE_FIELD_DEPENDENCIES: Record<string, string[]> = {
   variant: ['brand', 'model'],
 };
 
+/** True when Screen 3 has user selections or pre-fill/booking progress worth restoring. */
+function vehicleDetailsPrefillDone(vd: Record<string, any>): boolean {
+  return !!(
+    vd._prefillDone ||
+    vd._tvsCatalogLoaded ||
+    vd._bookingDone ||
+    vd.booking_no ||
+    vd.model ||
+    vd.submodel ||
+    vd.variant
+  );
+}
+
+function vehicleDetailsBookingDone(vd: Record<string, any>): boolean {
+  return !!(vd.booking_no || vd._bookingDone);
+}
+
+/** Only auto-persist Screen 3 when there is real progress — not partial enquiry-mapped fields. */
+function shouldAutoSaveVehicleDetails(vd: Record<string, any>): boolean {
+  return !!(
+    vd._prefillDone ||
+    vd._bookingDone ||
+    vd.booking_no ||
+    vd.brand
+  );
+}
+
 export function FormFill() {
   const { flowId, submissionId } = useParams();
   const navigate = useNavigate();
@@ -197,8 +245,24 @@ export function FormFill() {
   const [chassisLoading, setChassisLoading] = useState(false);
   const [allotmentLoading, setAllotmentLoading] = useState(false);
   const [generateInvoiceLoading, setGenerateInvoiceLoading] = useState(false);
+  const [generateInvoiceDone, setGenerateInvoiceDone] = useState(false);
   // const [saveBookingAfterAllotLoading, setSaveBookingAfterAllotLoading] = useState(false); // hidden for now
   const [selfManagedInsurance, setSelfManagedInsurance] = useState(false);
+
+  // Screen 3 auto-persist — survives dashboard navigation
+  const autoSavePausedRef = useRef(true);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const formDataRef = useRef(formData);
+  const bookingAmountRef = useRef(bookingAmount);
+  const submissionRef = useRef(submission);
+  const vehicleSessionRestoredForRef = useRef<string | null>(null);
+  // Signature of the last persisted Screen 3 payload — prevents redundant saves / infinite loops
+  const lastVehiclePersistSigRef = useRef<string>('');
+  // PartId we've already auto-fetched chassis frames for — prevents infinite refetch when stock is 0
+  const chassisAutoFetchedForRef = useRef<string>('');
+  formDataRef.current = formData;
+  bookingAmountRef.current = bookingAmount;
+  submissionRef.current = submission;
 
   // Part ID visibility toggle (like Model ID)
   const [showPartId, setShowPartId] = useState(false);
@@ -245,11 +309,25 @@ export function FormFill() {
   });
 
   const saveMutation = useMutation({
-    mutationFn: ({ id, tabIndex, data }: { id: string; tabIndex: number; data: Record<string, any>; screenCode: string }) =>
-      formApi.saveTab(id, tabIndex, data),
+    mutationFn: ({
+      id,
+      tabIndex,
+      data,
+      silent: _silent,
+    }: {
+      id: string;
+      tabIndex: number;
+      data: Record<string, any>;
+      screenCode: string;
+      silent?: boolean;
+    }) => formApi.saveTab(id, tabIndex, data),
     onSuccess: (response, variables) => {
       const savedSubmission = response.data.data;
       setSubmission(savedSubmission);
+      // Background (silent) saves send local data that is already authoritative.
+      // Merging the server copy back creates a new object reference for the screen,
+      // which retriggers the auto-save effect → infinite save loop. Skip it for silent saves.
+      if (variables.silent) return;
       // Only update the screen that was actually saved from server response,
       // preserving local pre-fill data on other screens (e.g. from pre-booking fetch)
       if (savedSubmission.formData) {
@@ -260,7 +338,14 @@ export function FormFill() {
         }));
       }
     },
-    onError: (error: any) => {
+    onError: (error: any, variables) => {
+      if (variables.silent) {
+        console.warn(
+          'Background save skipped validation:',
+          error.response?.data?.data || error.response?.data?.error
+        );
+        return;
+      }
       const validationErrors = error.response?.data?.data;
       if (Array.isArray(validationErrors)) {
         toast({ title: 'Validation Error', description: validationErrors.join(', '), variant: 'destructive' });
@@ -601,6 +686,9 @@ export function FormFill() {
         setFormData((prev: Record<string, any>) => {
           const vehicle_details = {
             ...(prev.vehicle_details || {}),
+            booking_amount: bookingAmount || prev.vehicle_details?.booking_amount || '',
+            _bookingDone: true,
+            _prefillDone: true,
             _bookingVehicleSnapshot: {
               submodel: vehicleSubmodel,
               variant: vehicleVariant,
@@ -786,7 +874,22 @@ export function FormFill() {
     const mobile = invoiceData.customer_mobile || customerData.mobile_no || '';
     const dob = customerData.dob || '';
     const gender = (invoiceData.customer_gender || customerData.gender || 'male').toLowerCase();
-    const language = invoiceData.customer_language || customerData.language || '';
+    const languageSource = customerData.language || invoiceData.customer_language || '';
+    const languageLabel =
+      resolveFieldOptionLabel(languageSource, 'customer_enquiry', 'language', flowScreens) ||
+      String(languageSource).trim();
+    const maritalSource =
+      customerData.marital_status || invoiceData.customer_marital_status || '';
+    const maritalStatusLabel =
+      resolveFieldOptionLabel(maritalSource, 'customer_enquiry', 'marital_status', flowScreens) ||
+      String(maritalSource).trim() ||
+      'Single';
+    const areaLabel = resolveFieldOptionLabel(
+      addressData.mandal,
+      'address_and_details',
+      'mandal',
+      flowScreens
+    );
 
     if (!bookingNo) {
       toast({
@@ -806,6 +909,14 @@ export function FormFill() {
     }
     if (!mobile) {
       toast({ title: 'Mobile number required', description: 'Customer mobile is missing from the form.', variant: 'destructive' });
+      return;
+    }
+    if (!areaLabel) {
+      toast({ title: 'Mandal required', description: 'Select Mandal on Screen 2 before generating invoice.', variant: 'destructive' });
+      return;
+    }
+    if (!languageLabel) {
+      toast({ title: 'Language required', description: 'Select Language on Screen 1 before generating invoice.', variant: 'destructive' });
       return;
     }
     if (!fetchedEnquiryNo) {
@@ -853,7 +964,9 @@ export function FormFill() {
         mobile,
         dob,
         gender,
-        language,
+        languageLabel,
+        maritalStatusLabel,
+        areaLabel,
         headless: headlessPref,
       });
 
@@ -870,6 +983,16 @@ export function FormFill() {
       const result = await pollAutomationJob(jobId);
 
       if (result === 'completed') {
+        setGenerateInvoiceDone(true);
+        const updatedInvoice = {
+          ...(formData['invoice'] || {}),
+          _invoiceAutomationDone: true,
+        };
+        setFormData((prev) => ({
+          ...prev,
+          invoice: updatedInvoice,
+        }));
+        void autoSaveTab('invoice', updatedInvoice);
         toast({ title: 'Invoice automation complete', description: 'Invoice form filled on TVS DMS.' });
       } else {
         const statusResp = await jobApi.getJobStatus(jobId);
@@ -937,8 +1060,18 @@ export function FormFill() {
         // Check if mappedFields is empty — means booking was already performed
         const dataFields = Object.keys(mapped).filter(k => !k.startsWith('_'));
         if (dataFields.length === 0) {
-          toast({ title: 'Booking already performed', description: 'No pre-booking data available. This enquiry has already been booked.', variant: 'destructive' });
-          setPreBookingDone(true);
+          const existingVd = formData['vehicle_details'] || {};
+          setPreBookingDone(vehicleDetailsPrefillDone(existingVd));
+          if (!existingVd.booking_no) {
+            await handleSearchBooking();
+          }
+          toast({
+            title: 'Booking already performed',
+            description: existingVd.booking_no
+              ? 'Showing saved booking details from this form.'
+              : 'No pre-booking data available. Loaded booked details if found on TVS.',
+            variant: existingVd.booking_no ? 'default' : 'destructive',
+          });
           return;
         }
         
@@ -1031,6 +1164,13 @@ export function FormFill() {
           newFormData['vehicle_details'] || {},
           newFormData['amounts_tax'] || {}
         );
+
+        if (newFormData['vehicle_details']) {
+          newFormData['vehicle_details'] = {
+            ...newFormData['vehicle_details'],
+            _prefillDone: true,
+          };
+        }
 
         setFormData(newFormData);
 
@@ -1174,6 +1314,13 @@ export function FormFill() {
         setSgstMeta(savedAmounts._sgstMeta);
       }
       setCurrentTab(sub.currentTabIndex || 0);
+      const vd = fd['vehicle_details'] || {};
+      setPreBookingDone(vehicleDetailsPrefillDone(vd));
+      setBookingSectionUnlocked(vehicleDetailsBookingDone(vd));
+      setGenerateInvoiceDone(!!fd['invoice']?._invoiceAutomationDone);
+      if (vd.booking_amount != null && vd.booking_amount !== '') {
+        setBookingAmount(String(vd.booking_amount));
+      }
       setIsInitialLoad(false);
     }
   }, [submissionData, isInitialLoad]);
@@ -1381,28 +1528,10 @@ export function FormFill() {
     }
   }, [currentTab, flowScreens.length]);
 
-  // Auto-unlock post-booking section & restore allotment state if data already exists (returning to saved form)
-  useEffect(() => {
-    const screenCode = flowScreens[currentTab]?.screen?.code;
-    if (screenCode === 'vehicle_details') {
-      const vehicleData = formData['vehicle_details'] || {};
-      if (vehicleData.booking_no) {
-        setBookingSectionUnlocked(true);
-        if (vehicleData.booking_amount) setBookingAmount(String(vehicleData.booking_amount));
-      }
-      if (vehicleData._bookingDone) {
-        setBookingSectionUnlocked(true);
-      }
-      if (vehicleData._allotmentDone) {
-        setPreBookingDone(true);
-      }
-    }
-  }, [currentTab, flowScreens.length]);
-
   // Fetch chassis frames via LoadVehicleFrameforAllotment — auto on Variant select or manual refresh
   const loadFramesForPart = async (
     partId: string | undefined,
-    options?: { toastOnResult?: boolean },
+    options?: { toastOnResult?: boolean; preserveSelection?: boolean },
   ): Promise<{ stock_available: number; chassis_no: string; engine_no: string; _partId?: string } | null> => {
     if (!fetchedEnquiryNo) {
       if (options?.toastOnResult !== false) {
@@ -1438,11 +1567,13 @@ export function FormFill() {
       }));
 
       setChassisOptions(mappedFrames);
+      const preserve = options?.preserveSelection === true;
+      const prevVd = formDataRef.current['vehicle_details'] || {};
       const patch = {
         stock_available: count,
         _partId: partId,
-        chassis_no: '',
-        engine_no: '',
+        chassis_no: preserve ? String(prevVd.chassis_no || '') : '',
+        engine_no: preserve ? String(prevVd.engine_no || '') : '',
       };
       setFormData((prev) => ({
         ...prev,
@@ -1494,6 +1625,7 @@ export function FormFill() {
   const handleFetchChassis = async () => {
     const vehicleData = formData['vehicle_details'] || {};
     const partId = vehicleData._variantPartId || vehicleData._partId;
+    if (partId) chassisAutoFetchedForRef.current = String(partId);
     await loadFramesForPart(partId);
   };
 
@@ -1655,6 +1787,7 @@ export function FormFill() {
         tabIndex,
         data: dataOverride || formData[screenCode] || {},
         screenCode,
+        silent: true,
       });
     } catch (e) {
       console.warn(`Auto-save ${screenCode} failed:`, e);
@@ -1663,6 +1796,155 @@ export function FormFill() {
 
   const autoSaveVehicleDetails = async (dataOverride?: Record<string, any>) =>
     autoSaveTab('vehicle_details', dataOverride);
+
+  const applyVehicleDetailsUiState = useCallback((vd: Record<string, any>) => {
+    setPreBookingDone(vehicleDetailsPrefillDone(vd));
+    setBookingSectionUnlocked(vehicleDetailsBookingDone(vd));
+    if (vd.booking_amount != null && vd.booking_amount !== '') {
+      setBookingAmount(String(vd.booking_amount));
+    }
+  }, []);
+
+  const getVehicleDetailsTabIndex = useCallback(
+    () => flowScreens.findIndex((fs: FlowScreen) => fs.screen?.code === 'vehicle_details'),
+    [flowScreens]
+  );
+
+  const getAmountsTaxTabIndex = useCallback(
+    () => flowScreens.findIndex((fs: FlowScreen) => fs.screen?.code === 'amounts_tax'),
+    [flowScreens]
+  );
+
+  const persistVehicleDetailsNow = useCallback(async () => {
+    const sub = submissionRef.current;
+    if (!sub || autoSavePausedRef.current) return;
+
+    const vehicleTabIndex = getVehicleDetailsTabIndex();
+    const amountsTabIndex = getAmountsTaxTabIndex();
+    if (vehicleTabIndex === -1) return;
+
+    const rawVd = formDataRef.current['vehicle_details'] || {};
+    if (!shouldAutoSaveVehicleDetails(rawVd)) return;
+
+    const vd = {
+      ...rawVd,
+      booking_amount: bookingAmountRef.current || rawVd.booking_amount || '',
+      ...(rawVd.model || rawVd.submodel || rawVd.variant ? { _prefillDone: true } : {}),
+    };
+    const at = buildSyncedAmountsTax(vd, formDataRef.current['amounts_tax'] || {});
+
+    // Skip the save entirely when nothing changed since the last persist.
+    // Set the signature BEFORE awaiting so concurrent re-fires are guarded immediately
+    // (prevents runaway overlapping saves that kept the Save button spinning).
+    const signature = JSON.stringify({ id: sub.id, vd, at });
+    if (signature === lastVehiclePersistSigRef.current) return;
+    lastVehiclePersistSigRef.current = signature;
+
+    autoSavePausedRef.current = true;
+    try {
+      await saveMutation.mutateAsync({
+        id: sub.id,
+        tabIndex: vehicleTabIndex,
+        data: vd,
+        screenCode: 'vehicle_details',
+        silent: true,
+      });
+      if (amountsTabIndex !== -1) {
+        await saveMutation.mutateAsync({
+          id: sub.id,
+          tabIndex: amountsTabIndex,
+          data: at,
+          screenCode: 'amounts_tax',
+          silent: true,
+        });
+      }
+    } catch (e) {
+      console.warn('Auto-save vehicle_details failed:', e);
+    } finally {
+      autoSavePausedRef.current = false;
+    }
+  }, [getVehicleDetailsTabIndex, getAmountsTaxTabIndex, saveMutation]);
+
+  // Keep a stable handle to the latest persist fn so the unmount-flush effect
+  // can use empty deps (and only fire on real unmount, not on every save state change).
+  const persistVehicleDetailsNowRef = useRef(persistVehicleDetailsNow);
+  persistVehicleDetailsNowRef.current = persistVehicleDetailsNow;
+
+  const restoreVehicleDetailsCatalog = useCallback(async (vd: Record<string, any>) => {
+    if (!vd || Object.keys(vd).length === 0) return;
+
+    if (vd._tvsCatalogLoaded && vd.brand === 'TVS') {
+      await loadTvsCatalogGroups(true);
+      if (vd.model) await loadCascadingOptions('submodel', vd);
+      if (vd.submodel || vd.model_id) await loadCascadingOptions('variant', vd);
+    } else if (vd.brand && vd.brand !== 'TVS') {
+      await loadCascadingOptions('brand', vd);
+      if (vd.model) await loadCascadingOptions('model', vd);
+      if (vd.model) await loadCascadingOptions('variant', vd);
+    }
+
+    const partId = vd._variantPartId || vd._partId;
+    if (partId) {
+      await loadFramesForPart(partId, { toastOnResult: false, preserveSelection: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Restore Screen 3 dropdowns + re-enable auto-save after submission load
+  useEffect(() => {
+    const screenCode = flowScreens[currentTab]?.screen?.code;
+    if (screenCode !== 'vehicle_details') return;
+    if (isInitialLoad || !submission) return;
+
+    const vd = formDataRef.current['vehicle_details'] || {};
+    applyVehicleDetailsUiState(vd);
+
+    if (vehicleSessionRestoredForRef.current !== submission.id) {
+      vehicleSessionRestoredForRef.current = submission.id;
+      const restorePartId = vd._variantPartId || vd._partId;
+      if (restorePartId) chassisAutoFetchedForRef.current = String(restorePartId);
+      autoSavePausedRef.current = true;
+      void restoreVehicleDetailsCatalog(vd).finally(() => {
+        autoSavePausedRef.current = false;
+      });
+      return;
+    }
+
+    // Auto-fetch chassis frames at most once per partId — avoids infinite refetch
+    // when a variant legitimately has 0 frames in stock.
+    const partId = String(vd._variantPartId || vd._partId || '');
+    if (
+      partId &&
+      chassisOptions.length === 0 &&
+      !chassisLoading &&
+      chassisAutoFetchedForRef.current !== partId
+    ) {
+      chassisAutoFetchedForRef.current = partId;
+      void loadFramesForPart(partId, { toastOnResult: false, preserveSelection: true });
+    }
+  }, [
+    currentTab,
+    submission?.id,
+    isInitialLoad,
+    applyVehicleDetailsUiState,
+    restoreVehicleDetailsCatalog,
+    chassisOptions.length,
+    chassisLoading,
+    flowScreens,
+  ]);
+
+  // Flush Screen 3 to DB only when the component actually unmounts (empty deps).
+  // Using a ref avoids re-running this effect's cleanup on every save-state change,
+  // which previously re-fired saves and kept the Save button spinning.
+  useEffect(() => {
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+      if (!autoSavePausedRef.current && submissionRef.current) {
+        void persistVehicleDetailsNowRef.current();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isViewer = user?.role === 'VIEWER';
   const isInsuranceExecutive = user?.role === 'INSURANCE_EXECUTIVE';
@@ -1913,7 +2195,7 @@ export function FormFill() {
       const fieldsToReset = dependentFields[fieldName] || [];
       
       setFormData((prev) => {
-        const updatedScreenData = { ...prev[currentScreenCode], [fieldName]: value };
+        const updatedScreenData = { ...prev[currentScreenCode], [fieldName]: value, _prefillDone: true };
         // Reset dependent fields
         fieldsToReset.forEach(field => {
           updatedScreenData[field] = '';
@@ -2029,15 +2311,23 @@ export function FormFill() {
     }
 
     const newErrors: Record<string, string> = {};
-    
+
+    // Chassis / engine come from TVS stock and may be unavailable; don't hard-block save/next.
+    const SOFT_OPTIONAL_FIELDS =
+      currentScreenCode === 'vehicle_details' ? ['chassis_no', 'engine_no'] : [];
+
     for (const field of currentFields) {
       // Skip validation for fields that are not visible (conditional fields)
       if (!isFieldVisible(field)) continue;
       
       const value = getFieldValue(field.name);
       
-      // Check required
-      if (field.isRequired && (value === undefined || value === null || value === '')) {
+      // Check required (chassis_no/engine_no are soft-optional on Screen 3)
+      if (
+        field.isRequired &&
+        !SOFT_OPTIONAL_FIELDS.includes(field.name) &&
+        (value === undefined || value === null || value === '')
+      ) {
         newErrors[field.name] = `${field.label} is required`;
         continue;
       }
@@ -2486,6 +2776,7 @@ export function FormFill() {
                   ...(selected?.engineNo ? { engine_no: selected.engineNo } : {}),
                   ...(selected?.keyNo ? { key_no: selected.keyNo } : {}),
                   ...(selected?.batteryNo ? { battery_no: selected.batteryNo } : {}),
+                  _prefillDone: true,
                 },
               }));
             }}
@@ -2608,13 +2899,16 @@ export function FormFill() {
                           _variantModelId: chosen?.modelId || '',
                           _variantName: chosen?.originalVariant || '',
                           _variantPartId: partId,
+                          _prefillDone: true,
                           chassis_no: '',
                           engine_no: '',
                         },
                       }));
                       if (partId) {
+                        chassisAutoFetchedForRef.current = String(partId);
                         loadFramesForPart(partId);
                       } else {
+                        chassisAutoFetchedForRef.current = '';
                         setChassisOptions([]);
                       }
                     }}
@@ -2673,6 +2967,7 @@ export function FormFill() {
                                     engine_no: '',
                                   },
                                 }));
+                                chassisAutoFetchedForRef.current = String(pid);
                                 loadFramesForPart(pid);
                               }}
                               className={cn(
@@ -2703,7 +2998,33 @@ export function FormFill() {
               <div className="relative">
                 <Select
                   value={value}
-                  onValueChange={(v) => setFieldValue(field.name, v)}
+                  onValueChange={(v: string) => {
+                    const label = submodelOpts.find((s) => s.value === v)?.label || '';
+                    setFormData((prev) => ({
+                      ...prev,
+                      vehicle_details: {
+                        ...prev['vehicle_details'],
+                        submodel: v,
+                        model_id: v,
+                        _submodelLabel: label,
+                        variant: '',
+                        _variantPartId: '',
+                        _variantModelId: '',
+                        _variantName: '',
+                        chassis_no: '',
+                        engine_no: '',
+                        _prefillDone: true,
+                      },
+                    }));
+                    setVehicleCatalogOptions((prev) => ({ ...prev, variants: [] }));
+                    setChassisOptions([]);
+                    loadCascadingOptions('variant', {
+                      ...vehicleData,
+                      submodel: v,
+                      model_id: v,
+                      _submodelLabel: label,
+                    });
+                  }}
                   disabled={isDisabled || isLoading}
                 >
                   <SelectTrigger className={cn(error && 'border-destructive', isLoading && 'pr-10')}>
@@ -3165,7 +3486,12 @@ export function FormFill() {
             {currentScreenCode === 'invoice' && (
               <Button
                 variant="outline"
-                className="gap-2 border-orange-400 text-orange-700 hover:bg-orange-50"
+                className={cn(
+                  'gap-2',
+                  generateInvoiceDone
+                    ? 'border-green-300 text-green-700 hover:bg-green-50'
+                    : 'border-orange-400 text-orange-700 hover:bg-orange-50'
+                )}
                 disabled={generateInvoiceLoading}
                 onClick={handleGenerateInvoiceViaAutomation}
               >
@@ -3173,6 +3499,11 @@ export function FormFill() {
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" />
                     Generating Invoice...
+                  </>
+                ) : generateInvoiceDone ? (
+                  <>
+                    <Check className="h-4 w-4" />
+                    Invoice Generated
                   </>
                 ) : (
                   <>
@@ -3287,7 +3618,17 @@ export function FormFill() {
                     type="number"
                     placeholder="Enter booking amount"
                     value={bookingAmount}
-                    onChange={(e: any) => setBookingAmount(e.target.value)}
+                    onChange={(e: any) => {
+                      const val = e.target.value;
+                      setBookingAmount(val);
+                      setFormData((prev) => ({
+                        ...prev,
+                        vehicle_details: {
+                          ...prev['vehicle_details'],
+                          booking_amount: val,
+                        },
+                      }));
+                    }}
                     disabled={bookingSectionUnlocked || performBookingLoading}
                   />
                 </div>

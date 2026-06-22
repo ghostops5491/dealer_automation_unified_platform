@@ -338,7 +338,9 @@ export const jobApi = {
     mobile: string;
     dob?: string;
     gender?: string;
-    language?: string;
+    languageLabel: string;
+    maritalStatusLabel?: string;
+    areaLabel: string;
     headless?: boolean;
   }) => api.post('/jobs/run-invoice', data),
   runEnquiry: (enquiryNo: string) => api.post('/jobs/run-enquiry', { enquiryNo }),

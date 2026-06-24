@@ -423,6 +423,10 @@ export const saveTabData = async (
     const isSelfManagedInsurance =
       flowScreen.screen.code === 'insurance_nominee_demographics' && data['_selfManaged'];
 
+    // Chassis / engine come from TVS stock and may be unavailable; don't hard-block save.
+    const softOptionalFields =
+      flowScreen.screen.code === 'vehicle_details' ? ['chassis_no', 'engine_no'] : [];
+
     for (const field of flowScreen.screen.fields) {
       if (isSelfManagedInsurance) break;
 
@@ -433,8 +437,12 @@ export const saveTabData = async (
       
       const value = data[field.name];
       
-      // Check required
-      if (field.isRequired && (value === undefined || value === null || value === '')) {
+      // Check required (chassis_no/engine_no are soft-optional on Screen 3)
+      if (
+        field.isRequired &&
+        !softOptionalFields.includes(field.name) &&
+        (value === undefined || value === null || value === '')
+      ) {
         validationErrors.push(`${field.label} is required`);
         continue;
       }

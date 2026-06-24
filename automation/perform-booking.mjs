@@ -178,6 +178,9 @@ try {
   await page.waitForTimeout(2000);
   await page.getByRole('button', { name: 'Create', exact: true }).click();
 
+  await page.waitForTimeout(2000);
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+
   const paymentModeOption = tvsPaymentModeOption(paymentMode);
   await page.locator('select[name="paymentMode"]').selectOption(paymentModeOption);
   console.log(`[step] payment mode: ${paymentMode} → ${paymentModeOption}`);

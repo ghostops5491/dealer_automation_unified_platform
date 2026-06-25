@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/store/auth';
 import { useState } from 'react';
 import { Separator } from '@/components/ui/separator';
+import { JobRunnerStatus } from '@/components/layout/JobRunnerStatus';
 
 const superAdminNavItems = [
   { icon: Home, label: 'Dashboard', path: '/admin' },
@@ -178,6 +179,10 @@ export function Sidebar() {
         </nav>
 
         <Separator />
+
+        <div className="px-2 pb-2">
+          <JobRunnerStatus collapsed={collapsed} />
+        </div>
 
         {/* User Info & Logout */}
         <div className="p-2">

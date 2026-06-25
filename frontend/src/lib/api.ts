@@ -349,6 +349,8 @@ export const jobApi = {
   getAllJobs: () => api.get('/jobs'),
   getJobStatus: (jobId: string) => api.get(`/jobs/${jobId}`),
   stopJob: (jobId: string) => api.post(`/jobs/${jobId}/stop`),
+  getRunnerHealth: () => api.get('/jobs/runner/health'),
+  restartRunner: () => api.post('/jobs/runner/restart'),
 };
 
 // External API Integration (TVS/Honda)

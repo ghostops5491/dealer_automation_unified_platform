@@ -4,9 +4,10 @@ import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../types';
 import { getBranchAutomationCredentials } from './automation-config.controller';
 
-// Job Runner service URL (runs on Windows host machine)
+// Job Runner service URL (runs on host machine outside Docker)
 // When running in Docker, 'host.docker.internal' refers to the host machine
 const JOB_RUNNER_URL = process.env.JOB_RUNNER_URL || 'http://host.docker.internal:3002';
+const JOB_RUNNER_ADMIN_KEY = process.env.JOB_RUNNER_ADMIN_KEY || '';
 
 export const runJobForAllEntries = async (req: Request, res: Response) => {
   try {
@@ -526,6 +527,72 @@ export const stopJob = async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error.response?.data?.error || error.message || 'Failed to stop job'
+    });
+  }
+};
+
+export const getRunnerHealth = async (_req: Request, res: Response) => {
+  try {
+    const response = await axios.get(`${JOB_RUNNER_URL}/health`, {
+      timeout: 5000,
+    });
+
+    res.json({
+      success: true,
+      running: response.data?.status === 'ok',
+      status: response.data?.status,
+      service: response.data?.service,
+    });
+  } catch (error: any) {
+    console.error('Job runner health check failed:', error.message);
+
+    res.json({
+      success: true,
+      running: false,
+      error:
+        error.code === 'ECONNREFUSED'
+          ? 'Job runner is not running'
+          : error.message || 'Job runner unreachable',
+    });
+  }
+};
+
+export const restartRunner = async (_req: Request, res: Response) => {
+  if (!JOB_RUNNER_ADMIN_KEY) {
+    return res.status(503).json({
+      success: false,
+      error: 'Job runner restart is not configured (set JOB_RUNNER_ADMIN_KEY on backend and job runner)',
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${JOB_RUNNER_URL}/admin/restart`,
+      {},
+      {
+        timeout: 10000,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': JOB_RUNNER_ADMIN_KEY,
+        },
+      }
+    );
+
+    res.json(response.data);
+  } catch (error: any) {
+    console.error('Job runner restart failed:', error.message);
+
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Job runner is offline. On the server run: sudo systemctl restart crm-job-runner',
+      });
+    }
+
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.error || error.message || 'Failed to restart job runner',
     });
   }
 };

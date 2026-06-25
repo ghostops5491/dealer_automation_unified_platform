@@ -10,7 +10,9 @@ import {
   runInsuranceJob,
   getJobStatus,
   stopJob,
-  getAllJobs
+  getAllJobs,
+  getRunnerHealth,
+  restartRunner,
 } from '../controllers/job.controller';
 
 const router = Router();
@@ -38,6 +40,12 @@ router.post('/run-enquiry', runEnquiryJob);
 
 // Run insurance job - available to all authenticated users (Insurance Executive primarily)
 router.post('/run-insurance', runInsuranceJob);
+
+// Job runner service status (all authenticated users)
+router.get('/runner/health', getRunnerHealth);
+
+// Restart job runner via systemd on host (Manager / Super Admin only)
+router.post('/runner/restart', requireSuperAdminOrRole('MANAGER'), restartRunner);
 
 // Get all jobs - available to all authenticated users (for viewing their own job status)
 router.get('/', getAllJobs);

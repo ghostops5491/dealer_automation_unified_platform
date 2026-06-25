@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { JobRunnerStatus } from '@/components/layout/JobRunnerStatus';
 
 interface Job {
   jobId: string;
@@ -355,38 +356,17 @@ export default function RunJob() {
         </Card>
       </div>
 
-      {/* Command Info */}
+      {/* Job Runner Service */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Setup Instructions</CardTitle>
+          <CardTitle className="text-lg">Job Runner Service</CardTitle>
+          <CardDescription>
+            Playwright automation runs on the server via systemd (crm-job-runner).
+            Managers can restart it from here or the sidebar.
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="space-y-4">
-            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
-              <p className="font-medium text-amber-800 mb-2">⚠️ Job Runner Service Required</p>
-              <p className="text-sm text-amber-700 mb-2">
-                Before running jobs, start the Job Runner service on your Windows machine:
-              </p>
-              <code className="block bg-amber-100 px-3 py-2 rounded text-sm font-mono">
-                python C:\Users\yashc\Desktop\Auto_Unified_Platform\job_runner\job_runner.py
-              </code>
-            </div>
-            
-            <div className="space-y-2 font-mono text-sm">
-              <div className="flex items-start gap-2">
-                <span className="text-muted-foreground">Working Directory:</span>
-                <code className="bg-muted px-2 py-0.5 rounded">
-                  C:\Users\yashc\Desktop\Auto_Unified_Platform\form_filling
-                </code>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-muted-foreground">Command:</span>
-                <code className="bg-muted px-2 py-0.5 rounded">
-                  python -m robot --test "Fill TVS Page" tests/fill_form.robot
-                </code>
-              </div>
-            </div>
-          </div>
+          <JobRunnerStatus />
         </CardContent>
       </Card>
     </div>
